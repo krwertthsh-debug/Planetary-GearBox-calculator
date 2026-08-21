@@ -1,44 +1,61 @@
-def solve_planetary(target_ratio, planets, max_od, module=2.0):
-    # R = 1 + Nr / Ns = 9  => Nr / Ns = 8 => Nr = 8 * Ns
-    # Condition 1: Nr = Ns + 2*Np => 8*Ns = Ns + 2*Np => 7*Ns = 2*Np => Np = 3.5 * Ns
-    # Condition 2 (Assembly): (Nr + Ns) % planets == 0 => (8*Ns + Ns) % 3 == 0 => 9*Ns % 3 == 0 (Always true for planets=3 since 9 is divisible by 3)
-    # Condition 3 (Max OD): OD_ring = m * (Nr + 2) <= max_od
-    # Let's search over Ns values
-    valid_configs = []
-    for Ns in range(12, 50): # Ns >= 12 to avoid undercutting
-        Nr = 8 * Ns
-        Np = 3.5 * Ns
-        if Np != int(Np):
-            continue
-        Np = int(Np)
-       
-        # Check if planets physically clear each other:
-        # Distance between planet centers: 2 * CD * sin(180/planets)
-        # CD = m * (Ns + Np) / 2
-        # Planet OD approx m * (Np + 2)
-        # Clear if 2 * CD * sin(180/planets) > m * (Np + 2)
-        import math
-        CD = (Ns + Np) / 2.0 # in units of module
-        dist_centers = 2 * CD * math.sin(math.radians(180 / planets))
-        planet_od_units = Np + 2
-        if dist_centers <= planet_od_units:
-            continue
-           
-        # Max OD constraint dictates module max
-        # OD_ring = m * (Nr + 2) <= 200 => m_max = 200 / (Nr + 2)
-        m_max = max_od / (Nr + 2)
-       
-        # Let's find standard modules: e.g., 1, 1.25, 1.5, 2, 2.5, 3, 4 etc.
-        valid_configs.append({
-            'Ns': Ns,
-            'Nr': Nr,
-            'Np': Np,
-            'm_max': m_max
-        })
-    return valid_configs
+import streamlit as st
+import math
 
-configs = solve_planetary(9, 3, 200)
-print(configs[:3])
+# 1. Page Configuration MUST be the very first Streamlit command executed
+st.set_page_config(page_title="Planetary Gearbox Calculator", layout="wide")
 
+st.title("⚙️ Planetary Gearbox Geometry & CAD Calculator")
+st.write("Input your gear parameters below to check assembly alignment and mechanical metrics.")
+
+# --- SIDEBAR INPUTS ---
+st.sidebar.header("1. Core Parameters")
+module = st.sidebar.number_input("Module (mm)", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
+pressure_angle = st.sidebar.slider("Pressure Angle (°)", min_value=14.5, max_value=25.0, value=20.0, step=0.5)
+
+st.sidebar.header("2. Tooth Configuration")
+N_sun = st.sidebar.number_input("Sun Gear Teeth (Ns)", min_value=10, max_value=100, value=12, step=1)
+N_planet = st.sidebar.number_input("Planet Gear Teeth (Np)", min_value=10, max_value=100, value=42, step=1)
+
+# Automatic calculation of Ring Gear teeth for clean alignment
+N_ring = N_sun + (2 * N_planet)
+num_planets = st.sidebar.number_input("Number of Planets (P)", min_value=2, max_value=6, value=3, step=1)
+
+# --- CALCULATIONS ---
+d_sun = module * N_sun
+d_planet = module * N_planet
+d_ring = module * N_ring
+center_dist = (d_sun + d_planet) / 2
+gear_ratio = 1 + (N_ring / N_sun)
+
+# Assembly Rules Verification
+assembly_factor = (N_sun + N_ring) / num_planets
+is_assembly_valid = assembly_factor.is_integer()
+
+# --- INTERFACE DISPLAY ---
+col1, col2, col3 = st.columns(3)
+col1.metric("Calculated Ring Teeth (Nr)", int(N_ring))
+col2.metric("Gear Ratio (Fixed Ring)", f"{gear_ratio:.2f}:1")
+col3.metric("Center Distance", f"{center_dist:.2f} mm")
+
+st.subheader("📋 Component Specifications Table")
+geo_data = {
+    "Component": ["Sun Gear", "Planet Gear", "Ring Gear"],
+    "Teeth Count": [N_sun, N_planet, int(N_ring)],
+    "Pitch Diameter (mm)": [d_sun, d_planet, d_ring],
+    "Outer Diameter (mm)": [d_sun + (2*module), d_planet + (2*module), d_ring - (2*module)]
+}
+st.table(geo_data)
+
+st.subheader("🧩 Assembly Condition Check")
+if is_assembly_valid:
+    st.success(f"✔️ Assembly Config Valid! Index factor is a whole integer: {int(assembly_factor)}")
+else:
+    st.error(f"❌ Index Check Failed! Factor is {assembly_factor:.2f}. Gears will jam unless spacing is adjusted manually.")
+
+st.subheader("🛠️ CAD Export Profile Variables")
+st.info(f"Use these parameters in your CAD Tool (SolidWorks/Fusion 360):\n"
+        f"- Module: {module} mm\n"
+        f"- Pressure Angle: {pressure_angle}°\n"
+        f"- Mapped Center Distance Circle: {center_dist} mm")
 
 

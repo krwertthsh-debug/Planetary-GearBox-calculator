@@ -262,55 +262,8 @@ def bearing_L10_life(C_dyn_N, P_equiv_N, n_rpm, bearing_type='Ball'):
     return {'L10_Mrev': L10_Mrev, 'L10_h': L10_h, 'p': p}
 
 # ================================================================
-# 9. ADVANCED 3D CAD-LIKE VISUALIZATION
+# 9. ADVANCED 3D CAD-LIKE VISUALIZATION (FIXED)
 # ================================================================
-
-def generate_involute_tooth_profile(module, z, phase_angle=0):
-    """Generate accurate involute gear tooth profile."""
-    # Involute parameters
-    alpha_p = math.radians(PRESSURE_ANGLE)  # Pressure angle
-    r_base = z * module / 2 * math.cos(alpha_p)  # Base circle radius
-    r_pitch = z * module / 2  # Pitch circle radius
-    r_tip = r_pitch + module  # Tip radius
-    r_root = r_pitch - 1.25 * module  # Root radius
-    
-    # Generate involute curve points
-    n_points = 20  # Points per tooth flank
-    theta_max = math.sqrt((r_tip**2 - r_base**2) / r_base**2)  # Max involute angle
-    
-    # Create involute points
-    involute_points = []
-    for i in range(n_points):
-        theta = theta_max * i / (n_points - 1)
-        x_inv = r_base * (math.cos(theta) + theta * math.sin(theta))
-        y_inv = r_base * (math.sin(theta) - theta * math.cos(theta))
-        involute_points.append((x_inv, y_inv))
-    
-    # Create full tooth profile
-    tooth_pts = []
-    half_tooth_angle = math.pi / z  # Angle per half tooth
-    
-    # Add involute flanks and tip arc
-    for i, (x, y) in enumerate(involute_points):
-        angle = math.atan2(y, x) - half_tooth_angle
-        tooth_pts.append((r_root * math.cos(angle), r_root * math.sin(angle)))
-    
-    # Add tip arc
-    for i in range(5):
-        angle = (i / 4) * half_tooth_angle * 2 - half_tooth_angle
-        tooth_pts.append((r_tip * math.cos(angle), r_tip * math.sin(angle)))
-    
-    # Add other flank
-    for i in range(n_points - 1, -1, -1):
-        x, y = involute_points[i]
-        angle = math.atan2(y, x) + half_tooth_angle
-        tooth_pts.append((r_root * math.cos(angle), r_root * math.sin(angle)))
-    
-    # Add root arc
-    tooth_pts.append(tooth_pts[0])
-    
-    return np.array(tooth_pts)
-
 
 def create_cad_quality_gear(teeth_count, module, face_width, is_internal=False, 
                            color='#708090', name='Gear', center_x=0, center_y=0, 
@@ -320,7 +273,7 @@ def create_cad_quality_gear(teeth_count, module, face_width, is_internal=False,
     r_tip = r_pitch + module if not is_internal else r_pitch - module
     r_root = r_pitch - 1.25 * module if not is_internal else r_pitch + 1.25 * module
     
-    # Generate base tooth profile for one tooth
+    # Generate involute tooth profile
     alpha_p = math.radians(PRESSURE_ANGLE)
     r_base = r_pitch * math.cos(alpha_p)
     
@@ -337,7 +290,7 @@ def create_cad_quality_gear(teeth_count, module, face_width, is_internal=False,
         tooth_pts = []
         # Flank 1 (involute)
         for i in range(pts_per_tooth // 2):
-            theta = math.sqrt((r_tip**2 - r_base**2) / r_base**2) * i / (pts_per_tooth // 2 - 1)
+            theta = math.sqrt((r_tip**2 - r_base**2) / r_base**2) * i / (pts_per_tooth // 2 - 1) if pts_per_tooth > 2 else 0
             x_inv = r_base * (math.cos(theta) + theta * math.sin(theta))
             y_inv = r_base * (math.sin(theta) - theta * math.cos(theta))
             angle = math.atan2(y_inv, x_inv) - math.pi / teeth_count / 2
@@ -352,7 +305,7 @@ def create_cad_quality_gear(teeth_count, module, face_width, is_internal=False,
         
         # Flank 2 (involute)
         for i in range(pts_per_tooth // 2 - 1, -1, -1):
-            theta = math.sqrt((r_tip**2 - r_base**2) / r_base**2) * i / (pts_per_tooth // 2 - 1)
+            theta = math.sqrt((r_tip**2 - r_base**2) / r_base**2) * i / (pts_per_tooth // 2 - 1) if pts_per_tooth > 2 else 0
             x_inv = r_base * (math.cos(theta) + theta * math.sin(theta))
             y_inv = r_base * (math.sin(theta) - theta * math.cos(theta))
             angle = math.atan2(y_inv, x_inv) + math.pi / teeth_count / 2
@@ -395,7 +348,7 @@ def create_cad_quality_gear(teeth_count, module, face_width, is_internal=False,
         j_faces.extend([next_idx, idx + n_pts, next_idx + n_pts])
         k_faces.extend([idx + n_pts, next_idx + n_pts, idx + n_pts])
     
-    # Create mesh
+    # Create mesh - REMOVED the problematic contour parameter
     gear_mesh = go.Mesh3d(
         x=vertices[:, 0],
         y=vertices[:, 1],
@@ -415,9 +368,7 @@ def create_cad_quality_gear(teeth_count, module, face_width, is_internal=False,
             fresnel=0.2
         ),
         hovertext=f"Z={teeth_count}, m={module}mm, d={2*r_pitch:.1f}mm",
-        showscale=False,
-        # Add edge lines for CAD look
-        contour=dict(show=True, color='rgba(0,0,0,0.2)', width=0.5)
+        showscale=False
     )
     
     return gear_mesh
@@ -562,14 +513,14 @@ def create_cad_quality_carrier(n_planets, r_carrier, d_pin, d_output):
     )
     fig_objs.append(hub_mesh)
     
-    # Planet pin posts with chamfered edges
+    # Planet pin posts
     pin_r = d_pin / 2
     for k in range(n_planets):
         ang = k * 2 * np.pi / n_planets
         px = r_carrier * math.cos(ang)
         py = r_carrier * math.sin(ang)
         
-        # Create pin post with taper
+        # Create pin post
         theta_pin = np.linspace(0, 2 * np.pi, 30)
         z_pin = np.linspace(-thickness*1.5, thickness*1.5, 20)
         theta_pin_grid, z_pin_grid = np.meshgrid(theta_pin, z_pin)
@@ -787,10 +738,11 @@ def create_advanced_assembly_view(S, P, R, m, n_planets, geom, pin_dia, d_shaft_
         pin_objs = create_cad_quality_shaft(pin_dia, face_width + 10, f'Planet Pin {k+1}', 
                                            '#3B3B3B', keyway=False)
         for obj in pin_objs:
+            if hasattr(obj, 'z') and isinstance(obj.z, (list, np.ndarray)):
+                obj.z = np.array(obj.z) - (face_width + 10) / 2
             if hasattr(obj, 'x') and hasattr(obj, 'y'):
                 obj.x = np.array(obj.x) + px
                 obj.y = np.array(obj.y) + py
-                obj.z = np.array(obj.z) - (face_width + 10) / 2
             fig.add_trace(obj)
     
     # Add ring gear
@@ -807,27 +759,31 @@ def create_advanced_assembly_view(S, P, R, m, n_planets, geom, pin_dia, d_shaft_
     input_shaft_objs = create_cad_quality_shaft(d_shaft_in, face_width + 30, 'Input Shaft', 
                                                '#8C8C8C', keyway=True, bearing_seats=True)
     for obj in input_shaft_objs:
-        obj.z = np.array(obj.z) - (face_width + 30) / 2
+        if hasattr(obj, 'z') and isinstance(obj.z, (list, np.ndarray)):
+            obj.z = np.array(obj.z) - (face_width + 30) / 2
         fig.add_trace(obj)
     
     # Add output shaft
     output_shaft_objs = create_cad_quality_shaft(d_shaft_out, face_width + 40, 'Output Shaft', 
                                                 '#8C8C8C', keyway=True, bearing_seats=True)
     for obj in output_shaft_objs:
-        obj.z = np.array(obj.z) - (face_width + 40) / 2
+        if hasattr(obj, 'z') and isinstance(obj.z, (list, np.ndarray)):
+            obj.z = np.array(obj.z) - (face_width + 40) / 2
         fig.add_trace(obj)
     
     # Add bearings
     # Input shaft bearing
     bearing_objs = create_cad_quality_bearing(d_shaft_in * 2.5, d_shaft_in, 10, 'Input Bearing')
     for obj in bearing_objs:
-        obj.z = np.array(obj.z) - face_width / 2 - 5
+        if hasattr(obj, 'z') and isinstance(obj.z, (list, np.ndarray)):
+            obj.z = np.array(obj.z) - face_width / 2 - 5
         fig.add_trace(obj)
     
     # Output shaft bearing
     bearing_objs = create_cad_quality_bearing(d_shaft_out * 2.5, d_shaft_out, 10, 'Output Bearing')
     for obj in bearing_objs:
-        obj.z = np.array(obj.z) + face_width / 2 + 5
+        if hasattr(obj, 'z') and isinstance(obj.z, (list, np.ndarray)):
+            obj.z = np.array(obj.z) + face_width / 2 + 5
         fig.add_trace(obj)
     
     # Update layout
@@ -1066,7 +1022,7 @@ with view_tabs[1]:
     # Planet Gear
     st.write("### 🔶 Planet Gear")
     fig_planet = go.Figure()
-    planet_objs = create_cad_quality_planet_gear(P, m_use, face_width, d_planet if 'd_planet' in dir() else geom['planet']['d_pitch'])
+    planet_objs = create_cad_quality_planet_gear(P, m_use, face_width, geom['planet']['d_pitch'])
     for obj in planet_objs:
         fig_planet.add_trace(obj)
     fig_planet.update_layout(

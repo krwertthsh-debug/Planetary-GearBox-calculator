@@ -193,10 +193,6 @@ def compute_kinematics_speeds(fixed_case, S, P, n_in_rpm, ratio_actual):
 # 6. ISO 6336 HELPER FUNCTIONS
 # ================================================================
 def tooth_form_factors(z):
-    """
-    Approximate YF and YS from ISO 6336 lookup tables (interpolated).
-    Returns (YF, YS).
-    """
     z_table = [15, 17, 20, 25, 30, 40, 50, 60, 80, 100]
     yf_table = [2.95, 2.85, 2.75, 2.65, 2.55, 2.45, 2.35, 2.25, 2.15, 2.05]
     ys_table = [1.52, 1.54, 1.56, 1.58, 1.60, 1.62, 1.64, 1.66, 1.68, 1.70]

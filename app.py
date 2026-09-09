@@ -1273,3 +1273,311 @@ and Lundberg-Palmgren bearing life equations. For production use, verify with:
 - ISO 281 (Bearing Life)
 - ASME B106.1M (Shaft Design)
 """)
+# ================================================================
+# OPENSCAD CAD GENERATION
+# ================================================================
+def generate_openscad_sun_gear(z, m, width, hub_od, bore_d, alpha=20.0):
+    """Generate OpenSCAD code for a sun gear (external gear with hub)"""
+    pitch_d = z * m
+    tip_d = pitch_d + 2 * m
+    root_d = pitch_d - 2.5 * m
+    return f"""
+module sun_gear() {{
+    // Sun gear: z={z}, m={m}, face width={width}mm
+    difference() {{
+        union() {{
+            gear_approx(z={z}, m={m}, width={width}, tip_d={tip_d:.2f}, root_d={root_d:.2f});
+            // Hub
+            cylinder(h={hub_len}, d={hub_od:.2f}, center=true);
+        }}
+        // Central bore
+        cylinder(h={width + 10}, d={bore_d:.2f}, center=true);
+    }}
+}}
+"""
+
+def generate_openscad_planet_gear(z, m, width, hub_od, bore_d):
+    """OpenSCAD for planet gear"""
+    pitch_d = z * m
+    tip_d = pitch_d + 2 * m
+    root_d = pitch_d - 2.5 * m
+    hub_len = max(width, 30.0)  # approximate
+    return f"""
+module planet_gear() {{
+    difference() {{
+        union() {{
+            gear_approx(z={z}, m={m}, width={width}, tip_d={tip_d:.2f}, root_d={root_d:.2f});
+            cylinder(h={hub_len}, d={hub_od:.2f}, center=true);
+        }}
+        cylinder(h={width + 10}, d={bore_d:.2f}, center=true);
+    }}
+}}
+"""
+
+def generate_openscad_ring_gear(z, m, width, outer_d, inner_d):
+    """OpenSCAD for internal ring gear"""
+    pitch_d = z * m
+    # For internal gear, tip is smaller, root is larger
+    tip_d = pitch_d - 2 * m
+    root_d = pitch_d + 2.5 * m
+    return f"""
+module ring_gear() {{
+    difference() {{
+        // Outer cylinder
+        cylinder(h={width}, d={outer_d:.2f}, center=true);
+        // Remove internal teeth cavity (simplified as a cylinder)
+        cylinder(h={width + 2}, d={root_d:.2f}, center=true);
+        // Add teeth as extrusions? We'll use a gear_approx with negative space
+        // For simplicity we just show the ring as a hollow cylinder with rectangular teeth cut.
+        // You can replace with a proper internal gear module from OpenSCAD libraries.
+        // We'll add a placeholder for teeth.
+    }}
+}}
+"""
+
+def generate_openscad_carrier(pitch_radius, d_pin, n_planets, plate_thickness, hub_od, bore_d):
+    """OpenSCAD for carrier plate"""
+    pin_d = d_pin
+    return f"""
+module carrier() {{
+    // Carrier plate
+    difference() {{
+        union() {{
+            // Main plate (simplified as a cylinder)
+            cylinder(h={plate_thickness}, d={2 * (pitch_radius + d_pin * 1.5):.2f}, center=true);
+            // Hub
+            cylinder(h={plate_thickness * 2}, d={hub_od:.2f}, center=true);
+            // Pin bosses
+            for (i = [0 : {n_planets - 1}]) {{
+                rotate([0, 0, i * 360 / {n_planets}])
+                    translate([{pitch_radius:.2f}, 0, 0])
+                    cylinder(h={plate_thickness + 10}, d={pin_d + 6:.2f}, center=true);
+            }}
+        }}
+        // Central bore
+        cylinder(h={plate_thickness * 3}, d={bore_d:.2f}, center=true);
+        // Pin holes (through bosses)
+        for (i = [0 : {n_planets - 1}]) {{
+            rotate([0, 0, i * 360 / {n_planets}])
+                translate([{pitch_radius:.2f}, 0, 0])
+                cylinder(h={plate_thickness + 20}, d={pin_d:.2f}, center=true);
+        }}
+    }}
+}}
+"""
+
+def generate_openscad_shaft(diameter, length, key_width=None, key_depth=None):
+    """OpenSCAD for a shaft with optional keyway"""
+    key_str = ""
+    if key_width and key_depth:
+        key_str = f"""
+    // Keyway
+    translate([0, {-diameter/2:.2f}, 0])
+        cube([{key_width:.2f}, {key_depth:.2f}, {length}]);
+"""
+    return f"""
+module shaft() {{
+    difference() {{
+        cylinder(h={length}, d={diameter:.2f}, center=true);
+        {key_str}
+    }}
+}}
+"""
+
+def generate_openscad_pin(diameter, length):
+    """OpenSCAD for a planet pin"""
+    return f"""
+module pin() {{
+    cylinder(h={length}, d={diameter:.2f}, center=true);
+}}
+"""
+
+def generate_openscad_assembly(zs, zp, zr, m, n_planets, d_pin, b, 
+                               sun_hub_od, sun_bore, 
+                               planet_hub_od, planet_bore,
+                               ring_outer_d, ring_face_width,
+                               carrier_pitch_radius, carrier_plate_thk, carrier_hub_od, carrier_bore,
+                               din, dout, pin_span):
+    """Generate the full OpenSCAD assembly"""
+    # Sun gear params
+    sun_tip_d = zs * m + 2 * m
+    sun_root_d = zs * m - 2.5 * m
+    sun_hub_len = b  # simplified
+    # Planet gear params
+    planet_tip_d = zp * m + 2 * m
+    planet_root_d = zp * m - 2.5 * m
+    planet_hub_len = b  # simplified
+    # Ring gear params
+    ring_tip_d = zr * m - 2 * m
+    ring_root_d = zr * m + 2.5 * m
+    # Carrier
+    carrier_od = 2 * (carrier_pitch_radius + d_pin * 1.5)
+    # Shaft lengths
+    in_shaft_len = 40 + b + 20
+    out_shaft_len = 40 + b + 20 + 30
+
+    code = f"""
+// =====================================================
+// PLANETARY GEARBOX - OpenSCAD GENERATED CODE
+// =====================================================
+
+// Parameters (all in mm)
+zs = {zs};       // Sun teeth
+zp = {zp};       // Planet teeth
+zr = {zr};       // Ring teeth
+m = {m};         // Module
+n_planets = {n_planets};   // Number of planets
+b = {b};         // Face width
+d_pin = {d_pin}; // Planet pin diameter
+pin_span = {pin_span};     // Pin span
+
+// Gear module (simplified involute approximation)
+module gear_approx(z, m, width, tip_d, root_d) {{
+    pitch_r = z * m / 2;
+    // Tooth width at pitch circle (approximate)
+    tooth_angle = 360 / z;
+    // Create each tooth
+    for (i = [0 : z-1]) {{
+        rotate([0, 0, i * tooth_angle])
+            translate([pitch_r, 0, 0])
+            // Trapezoid tooth shape
+            polyhedron(
+                points = [
+                    [ -tooth_width/2, 0, 0 ],
+                    [ tooth_width/2, 0, 0 ],
+                    [ tooth_width_top/2, 0, width ],
+                    [ -tooth_width_top/2, 0, width ]
+                ],
+                faces = [[0,1,2,3]]
+            );
+    }}
+    // Add basic cylinder body
+    difference() {{
+        cylinder(h=width, d=tip_d, center=true);
+        cylinder(h=width+2, d=root_d, center=true);
+    }}
+}}
+
+// Sun gear
+module sun_gear() {{
+    difference() {{
+        union() {{
+            gear_approx(z={zs}, m={m}, width={b}, tip_d={sun_tip_d:.2f}, root_d={sun_root_d:.2f});
+            cylinder(h={b}, d={sun_hub_od:.2f}, center=true);
+        }}
+        cylinder(h={b + 10}, d={sun_bore:.2f}, center=true);
+    }}
+}}
+
+// Planet gear
+module planet_gear() {{
+    difference() {{
+        union() {{
+            gear_approx(z={zp}, m={m}, width={b}, tip_d={planet_tip_d:.2f}, root_d={planet_root_d:.2f});
+            cylinder(h={b}, d={planet_hub_od:.2f}, center=true);
+        }}
+        cylinder(h={b + 10}, d={planet_bore:.2f}, center=true);
+    }}
+}}
+
+// Ring gear (internal)
+module ring_gear() {{
+    difference() {{
+        // Outer body
+        cylinder(h={ring_face_width}, d={ring_outer_d:.2f}, center=true);
+        // Inner cavity (root diameter)
+        cylinder(h={ring_face_width + 2}, d={ring_root_d:.2f}, center=true);
+        // Add teeth as extrusions (simplified)
+        for (i = [0 : {zr - 1}]) {{
+            rotate([0, 0, i * 360 / {zr}])
+                translate([0, 0, 0])
+                // Add internal tooth block
+                translate([0, {ring_root_d/2 - 2:.2f}, 0])
+                    cube([ {m}, 4, {ring_face_width} ], center=true);
+        }}
+    }}
+}}
+
+// Carrier plate
+module carrier() {{
+    difference() {{
+        union() {{
+            cylinder(h={carrier_plate_thk}, d={carrier_od:.2f}, center=true);
+            cylinder(h={carrier_plate_thk * 2}, d={carrier_hub_od:.2f}, center=true);
+            for (i = [0 : {n_planets - 1}]) {{
+                rotate([0, 0, i * 360 / {n_planets}])
+                    translate([{carrier_pitch_radius:.2f}, 0, 0])
+                    cylinder(h={carrier_plate_thk + 10}, d={d_pin + 6:.2f}, center=true);
+            }}
+        }}
+        cylinder(h={carrier_plate_thk * 3}, d={carrier_bore:.2f}, center=true);
+        for (i = [0 : {n_planets - 1}]) {{
+            rotate([0, 0, i * 360 / {n_planets}])
+                translate([{carrier_pitch_radius:.2f}, 0, 0])
+                cylinder(h={carrier_plate_thk + 20}, d={d_pin:.2f}, center=true);
+        }}
+    }}
+}}
+
+// Input shaft
+module input_shaft() {{
+    cylinder(h={in_shaft_len}, d={din:.2f}, center=true);
+}}
+
+// Output shaft
+module output_shaft() {{
+    cylinder(h={out_shaft_len}, d={dout:.2f}, center=true);
+}}
+
+// Planet pin
+module planet_pin() {{
+    cylinder(h={pin_span + 10}, d={d_pin:.2f}, center=true);
+}}
+
+// Assembly
+module assembly() {{
+    // Place sun gear at origin
+    sun_gear();
+
+    // Place planets around
+    for (i = [0 : {n_planets - 1}]) {{
+        rotate([0, 0, i * 360 / {n_planets}])
+            translate([{carrier_pitch_radius:.2f}, 0, 0])
+            planet_gear();
+    }}
+
+    // Ring gear (outer)
+    ring_gear();
+
+    // Carrier
+    carrier();
+
+    // Input shaft (placed below sun)
+    translate([0, 0, -{in_shaft_len/2 + b/2:.2f}])
+        input_shaft();
+
+    // Output shaft (placed above carrier)
+    translate([0, 0, {carrier_plate_thk/2 + b/2:.2f}])
+        output_shaft();
+
+    // Planet pins
+    for (i = [0 : {n_planets - 1}]) {{
+        rotate([0, 0, i * 360 / {n_planets}])
+            translate([{carrier_pitch_radius:.2f}, 0, 0])
+            planet_pin();
+    }}
+}}
+
+// Uncomment to render only individual parts
+// sun_gear();
+// planet_gear();
+// ring_gear();
+// carrier();
+// input_shaft();
+// output_shaft();
+// planet_pin();
+
+// Render full assembly
+assembly();
+"""
+    return code

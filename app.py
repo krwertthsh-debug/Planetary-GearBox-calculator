@@ -1,16 +1,18 @@
 """
-PLANETARY GEARBOX DESIGNER — COMPLETE PLATFORM
-================================================
-Single-stage 1:9 ratio planetary gearbox with:
-- Customisable sun/planet/ring teeth and module
-- Complete component dimensions (thickness, diameters, heights)
-- Full force, stress, deflection, and life calculations
-- Streamlit web interface with results tabs
+PLANETARY GEARBOX DESIGNER v3 — COMPLETE PLATFORM
+=====================================================
+Combined version incorporating:
+- Your original Streamlit calculator structure
+- Enhanced component dimension calculations
+- 3D visualization of all components (actual involute tooth geometry)
+- Pastable input configuration format
+- Comprehensive output tabs with full calculations
 """
 
 import math
 import io
 import struct
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -59,69 +61,239 @@ MATERIALS = {
     }
 }
 
-# Bearing catalogues (simplified - C_dyn in N, max speed in rpm)
-BEARING_CATALOGUE = {
-    "SKF 61804 (20×32×7)": {"C": 4200.0, "n_max": 30000.0, "type": "Ball"},
-    "SKF 61806 (30×42×7)": {"C": 5100.0, "n_max": 24000.0, "type": "Ball"},
-    "SKF 61904 (20×37×9)": {"C": 7800.0, "n_max": 22000.0, "type": "Ball"},
-    "SKF 61906 (30×47×9)": {"C": 9900.0, "n_max": 18000.0, "type": "Ball"},
-    "SKF 6004 (20×42×12)": {"C": 9400.0, "n_max": 26000.0, "type": "Ball"},
-    "SKF 6204 (20×47×14)": {"C": 12800.0, "n_max": 22000.0, "type": "Ball"},
-    "INA NKI12/16 (12×24×16)": {"C": 6500.0, "n_max": 18000.0, "type": "Roller"},
-    "INA NKI15/20 (15×27×20)": {"C": 8900.0, "n_max": 15000.0, "type": "Roller"},
-    "INA NKI20/20 (20×32×20)": {"C": 11200.0, "n_max": 12000.0, "type": "Roller"},
-}
-
 # ================================================================
-# DATA CLASSES
+# 3D GEAR TOOTH GEOMETRY (TRUE INVOLUTE)
 # ================================================================
-@dataclass
-class GearGeometry:
-    """Complete geometry for a single gear"""
-    z: int
-    module: float
-    pitch_d: float
-    base_d: float
-    tip_d: float
-    root_d: float
-    addendum: float
-    dedendum: float
-    circular_pitch: float
-    face_width: float
+def involute_tooth_curve(z, m, alpha_deg=20.0, internal=False, points_per_flank=8):
+    """Generate true involute tooth profile for one tooth period"""
+    alpha = math.radians(alpha_deg)
+    r_pitch = z * m / 2.0
+    r_base = r_pitch * math.cos(alpha)
     
-    def to_dict(self):
-        return asdict(self)
-
-@dataclass
-class ComponentDimensions:
-    """Physical dimensions for every component"""
-    # Sun gear
-    sun_gear: dict
-    # Planet gear
-    planet_gear: dict
-    # Ring gear
-    ring_gear: dict
-    # Carrier
-    carrier: dict
-    # Shafts
-    input_shaft: dict
-    output_shaft: dict
-    # Planet pin
-    planet_pin: dict
-    # Housing
-    housing: dict
+    # Involute parameters
+    def involute_point(r):
+        """Calculate involute point at radius r"""
+        theta = math.sqrt(max((r / r_base)**2 - 1.0, 0.0))
+        x = r_base * (math.cos(theta) + theta * math.sin(theta))
+        y = r_base * (math.sin(theta) - theta * math.cos(theta))
+        return x, y
     
-    def to_dataframe(self):
-        rows = []
-        for component, dims in asdict(self).items():
-            for param, value in dims.items():
-                rows.append({"Component": component.replace('_', ' ').title(),
-                            "Parameter": param.replace('_', ' ').title(),
-                            "Value": value, "Unit": "mm"})
-        return pd.DataFrame(rows)
+    # Generate involute flanks
+    r_start = max(r_base, r_pitch - 1.25 * m)
+    r_end = r_pitch + m
+    
+    r_vals = np.linspace(r_start, r_end, points_per_flank)
+    
+    # Left flank
+    left_flank = []
+    for r in r_vals:
+        x, y = involute_point(r)
+        left_flank.append((x, y))
+    
+    # Right flank (mirror)
+    right_flank = [(-x, y) for x, y in reversed(left_flank)]
+    
+    # Tip arc
+    tip_start_angle = math.atan2(left_flank[-1][1], left_flank[-1][0])
+    tip_end_angle = math.atan2(right_flank[0][1], right_flank[0][0])
+    tip_angles = np.linspace(tip_start_angle, tip_end_angle, 4)
+    tip_points = [(r_end * math.cos(a), r_end * math.sin(a)) for a in tip_angles]
+    
+    # Root arc
+    root_start_angle = math.atan2(right_flank[-1][1], right_flank[-1][0]) + 2 * PI / z
+    root_end_angle = math.atan2(left_flank[0][1], left_flank[0][0]) + 2 * PI / z
+    root_angles = np.linspace(root_start_angle, root_end_angle, 4)
+    root_points = [(r_start * math.cos(a), r_start * math.sin(a)) for a in root_angles]
+    
+    # Combine all points for one tooth period
+    all_points = right_flank + tip_points[1:] + left_flank[1:] + root_points[1:]
+    return np.array(all_points)
+
+def full_gear_outline(z, m, alpha_deg=20.0, internal=False):
+    """Generate full gear outline by rotating tooth period z times"""
+    tooth_pts = involute_tooth_curve(z, m, alpha_deg, internal)
+    period = 2 * PI / z
+    
+    all_x, all_y = [], []
+    for i in range(z):
+        angle = i * period
+        c, s = math.cos(angle), math.sin(angle)
+        for px, py in tooth_pts:
+            all_x.append(px * c - py * s)
+            all_y.append(px * s + py * c)
+    
+    return np.array(all_x), np.array(all_y)
+
+def gear_solid_3d(z, m, alpha_deg=20.0, face_width=10.0, hub_dia=None, bore_dia=None, internal=False):
+    """Create 3D mesh for a gear (extruded involute profile with hub/bore)"""
+    x, y = full_gear_outline(z, m, alpha_deg, internal)
+    
+    # Add hub if specified
+    if hub_dia is not None and not internal:
+        # Add hub circle points
+        hub_r = hub_dia / 2.0
+        hub_pts = 20
+        hub_angles = np.linspace(0, 2*PI, hub_pts, endpoint=False)
+        hub_x = hub_r * np.cos(hub_angles)
+        hub_y = hub_r * np.sin(hub_angles)
+        
+        # Add bore if specified
+        if bore_dia is not None:
+            bore_r = bore_dia / 2.0
+            # Reverse order for bore (hole)
+            bore_x = bore_r * np.cos(hub_angles[::-1])
+            bore_y = bore_r * np.sin(hub_angles[::-1])
+            
+            x = np.concatenate([x, hub_x, bore_x])
+            y = np.concatenate([y, hub_y, bore_y])
+    
+    # Create extrusion (bottom and top faces + side walls)
+    n = len(x)
+    z0, z1 = 0.0, face_width
+    
+    # Vertices: bottom face, top face
+    vx = np.concatenate([x, x])
+    vy = np.concatenate([y, y])
+    vz = np.concatenate([np.full(n, z0), np.full(n, z1)])
+    
+    # Faces
+    I, J, K = [], [], []
+    for i in range(n):
+        next_i = (i + 1) % n
+        # Side wall
+        I.append(i); J.append(next_i); K.append(next_i + n)
+        I.append(i); J.append(next_i + n); K.append(i + n)
+        
+        # Bottom face (fan triangulation from center)
+        I.append(n * 2); J.append(i); K.append(next_i)
+        
+        # Top face
+        I.append(n * 2 + 1); J.append(next_i + n); K.append(i + n)
+    
+    # Add center vertices
+    vx = np.concatenate([vx, [0.0, 0.0]])
+    vy = np.concatenate([vy, [0.0, 0.0]])
+    vz = np.concatenate([vz, [z0, z1]])
+    
+    return vx, vy, vz, I, J, K
+
+def ring_gear_solid_3d(z, m, alpha_deg=20.0, face_width=10.0, outer_dia=None):
+    """Create 3D mesh for internal ring gear"""
+    alpha = math.radians(alpha_deg)
+    r_pitch = z * m / 2.0
+    r_base = r_pitch * math.cos(alpha)
+    
+    # Generate internal gear profile (reversed)
+    x, y = full_gear_outline(z, m, alpha_deg, internal=True)
+    
+    # Add outer diameter
+    if outer_dia is not None:
+        outer_r = outer_dia / 2.0
+        outer_pts = 30
+        outer_angles = np.linspace(0, 2*PI, outer_pts, endpoint=False)
+        outer_x = outer_r * np.cos(outer_angles)
+        outer_y = outer_r * np.sin(outer_angles)
+        
+        x = np.concatenate([x, outer_x])
+        y = np.concatenate([y, outer_y])
+    
+    # Create extrusion
+    n = len(x)
+    z0, z1 = 0.0, face_width
+    
+    vx = np.concatenate([x, x])
+    vy = np.concatenate([y, y])
+    vz = np.concatenate([np.full(n, z0), np.full(n, z1)])
+    
+    I, J, K = [], [], []
+    for i in range(n):
+        next_i = (i + 1) % n
+        I.append(i); J.append(next_i); K.append(next_i + n)
+        I.append(i); J.append(next_i + n); K.append(i + n)
+    
+    return vx, vy, vz, I, J, K
+
+def carrier_solid_3d(pitch_radius, d_pin, n_planets, plate_thickness, hub_diameter, bore_diameter):
+    """Create 3D mesh for carrier plate with pin bosses and central hub"""
+    # Base plate
+    plate_radius = pitch_radius + d_pin * 1.5
+    plate_pts = 40
+    angles = np.linspace(0, 2*PI, plate_pts, endpoint=False)
+    
+    x = plate_radius * np.cos(angles)
+    y = plate_radius * np.sin(angles)
+    
+    # Add pin bosses
+    for i in range(n_planets):
+        boss_angle = i * 2 * PI / n_planets
+        boss_r = d_pin / 2.0 + 2.0
+        boss_x = pitch_radius * math.cos(boss_angle) + boss_r * np.cos(angles)
+        boss_y = pitch_radius * math.sin(boss_angle) + boss_r * np.sin(angles)
+        x = np.concatenate([x, boss_x])
+        y = np.concatenate([y, boss_y])
+    
+    # Add hub
+    hub_r = hub_diameter / 2.0
+    hub_x = hub_r * np.cos(angles)
+    hub_y = hub_r * np.sin(angles)
+    
+    x = np.concatenate([x, hub_x])
+    y = np.concatenate([y, hub_y])
+    
+    # Add bore (if specified)
+    if bore_diameter:
+        bore_r = bore_diameter / 2.0
+        bore_x = bore_r * np.cos(angles[::-1])
+        bore_y = bore_r * np.sin(angles[::-1])
+        x = np.concatenate([x, bore_x])
+        y = np.concatenate([y, bore_y])
+    
+    # Create extrusion
+    n = len(x)
+    z0, z1 = 0.0, plate_thickness
+    
+    vx = np.concatenate([x, x])
+    vy = np.concatenate([y, y])
+    vz = np.concatenate([np.full(n, z0), np.full(n, z1)])
+    
+    I, J, K = [], [], []
+    for i in range(n):
+        next_i = (i + 1) % n
+        I.append(i); J.append(next_i); K.append(next_i + n)
+        I.append(i); J.append(next_i + n); K.append(i + n)
+    
+    return vx, vy, vz, I, J, K
+
+def shaft_solid_3d(diameter, length):
+    """Create 3D mesh for a cylindrical shaft"""
+    radius = diameter / 2.0
+    n = 32
+    angles = np.linspace(0, 2*PI, n, endpoint=False)
+    
+    x = radius * np.cos(angles)
+    y = radius * np.sin(angles)
+    
+    # Create extrusion
+    z0, z1 = 0.0, length
+    
+    vx = np.concatenate([x, x])
+    vy = np.concatenate([y, y])
+    vz = np.concatenate([np.full(n, z0), np.full(n, z1)])
+    
+    I, J, K = [], [], []
+    for i in range(n):
+        next_i = (i + 1) % n
+        I.append(i); J.append(next_i); K.append(next_i + n)
+        I.append(i); J.append(next_i + n); K.append(i + n)
+    
+    return vx, vy, vz, I, J, K
+
+def planet_pin_solid_3d(diameter, length):
+    """Create 3D mesh for planet pin"""
+    return shaft_solid_3d(diameter, length)
 
 # ================================================================
-# GEOMETRY CALCULATIONS
+# GEOMETRY CALCULATIONS (from original code)
 # ================================================================
 def exact_ring_teeth(zs: int, zp: int) -> int:
     """Ring teeth from coaxiality condition"""
@@ -135,12 +307,33 @@ def assembly_ok(zs: int, zr: int, nplanets: int) -> bool:
     """Planetary assembly condition"""
     return (zs + zr) % nplanets == 0
 
-def planet_spacing_ok(zs: int, zp: int, nplanets: int) -> bool:
+def planet_spacing_ok(zs: int, zp: int, nplanets: int, clearance_mm: float = 1.0) -> bool:
     """Check adjacent planet clearance"""
-    return (zs + zp) * math.sin(PI / nplanets) > (zp + 2.0)
+    return (zs + zp) * math.sin(PI / nplanets) > (zp + 2.0 + clearance_mm)
+
+def suggest_tooth_sets(target_ratio=9.0, nplanets=3, max_od=200.0, modules=MODULES):
+    """Find valid tooth combinations for target ratio"""
+    rows = []
+    for zs in range(17, 61):
+        for zp in range(17, 101):
+            zr = exact_ring_teeth(zs, zp)
+            ratio = ratio_ring_fixed(zs, zr)
+            if abs(ratio - target_ratio) > 1e-9:
+                continue
+            aok = assembly_ok(zs, zr, nplanets)
+            cok = planet_spacing_ok(zs, zp, nplanets)
+            if not (aok and cok):
+                continue
+            for m in modules:
+                ring_root_d = zr * m - 2.5 * m
+                od = ring_root_d + 2.5 * m + 2.0 * 6.0
+                if od <= max_od:
+                    rows.append(dict(zs=zs, zp=zp, zr=zr, ratio=ratio, module=m, od=od,
+                                     sun_pitch=zs*m, planet_pitch=zp*m, ring_pitch=zr*m))
+    return pd.DataFrame(rows)
 
 def gear_geometry(z, m, alpha_deg=20.0, internal=False, beta_deg=0.0):
-    """Complete gear geometry including all diameters"""
+    """Complete gear geometry"""
     beta = math.radians(beta_deg)
     alpha_n = math.radians(alpha_deg)
     alpha_t = math.atan(math.tan(alpha_n) / math.cos(beta))
@@ -149,273 +342,205 @@ def gear_geometry(z, m, alpha_deg=20.0, internal=False, beta_deg=0.0):
     db = d * math.cos(alpha_t)
     
     if internal:
-        da = d - 2.0 * m / math.cos(beta)
-        df = d + 2.5 * m / math.cos(beta)
-        addendum = m
-        dedendum = 1.25 * m
+        da = d - 2*m / math.cos(beta)
+        df = d + 2.5*m / math.cos(beta)
     else:
-        da = d + 2.0 * m / math.cos(beta)
-        df = d - 2.5 * m / math.cos(beta)
-        addendum = m
-        dedendum = 1.25 * m
+        da = d + 2*m / math.cos(beta)
+        df = d - 2.5*m / math.cos(beta)
     
-    return {
-        "z": z, "module": m, "pitch_d": d, "base_d": db,
-        "tip_d": da, "root_d": df, "addendum": addendum,
-        "dedendum": dedendum, "alpha_t_deg": math.degrees(alpha_t),
-        "circular_pitch": PI * m,
-        "face_width": 0.0  # to be set later
-    }
-
-def calculate_face_width(module, bm_ratio=12.0):
-    """Calculate face width from module and b/m ratio"""
-    return bm_ratio * module
+    return dict(z=z, module=m, pitch_d=d, base_d=db, tip_d=da, root_d=df,
+                addendum=m, dedendum=1.25*m, alpha_t=math.degrees(alpha_t))
 
 # ================================================================
-# LOAD & STRESS CALCULATIONS
+# LOADS & STRESS CALCULATIONS
 # ================================================================
-def calculate_loads(Tin_Nm, zs, zr, nplanets, m, alpha_deg=20.0, beta_deg=0.0, Kp=1.10):
+def kinematics_ring_fixed(nin, ratio, zs, zp):
+    """Calculate member speeds"""
+    ncarrier = nin / ratio
+    nplanet_rel = abs(nin - ncarrier) * zs / zp
+    return dict(n_sun=nin, n_ring=0.0, n_carrier=ncarrier,
+                n_planet_rel_carrier=nplanet_rel, n_out=ncarrier)
+
+def mesh_loads(Tin_Nm, zs, zr, nplanets, m, alpha_deg, beta_deg, Kp=1.10):
     """Calculate all mesh forces"""
-    alpha = math.radians(alpha_deg)
-    beta = math.radians(beta_deg)
-    
-    # Base circle radii
-    rb_s = (zs * m / (2 * math.cos(beta))) * math.cos(alpha)
-    rb_r = (zr * m / (2 * math.cos(beta))) * math.cos(alpha)
-    
-    # Tangential forces (per planet)
-    Ft_sp = Tin_Nm * 1000.0 / (nplanets * rb_s) * Kp
-    Ft_rp = Ft_sp * (rb_s / rb_r)
-    
-    # Radial forces
-    Fr_sp = Ft_sp * math.tan(alpha)
-    Fr_rp = Ft_rp * math.tan(alpha)
-    
-    # Normal (line-of-action) forces
-    Fn_sp = Ft_sp / math.cos(alpha)
-    Fn_rp = Ft_rp / math.cos(alpha)
-    
-    return {
-        "Ft_SP": Ft_sp, "Ft_RP": Ft_rp,
-        "Fr_SP": Fr_sp, "Fr_RP": Fr_rp,
-        "Fn_SP": Fn_sp, "Fn_RP": Fn_rp
-    }
+    a = math.radians(alpha_deg)
+    rb_s = (zs*m/(2*math.cos(math.radians(beta_deg)))) * math.cos(a)
+    rb_r = (zr*m/(2*math.cos(math.radians(beta_deg)))) * math.cos(a)
+    Ft_sp = Tin_Nm*1000.0 / (nplanets * rb_s) * Kp
+    Ft_rp = Ft_sp * (rb_s/rb_r)
+    Fr_sp = Ft_sp * math.tan(a)
+    Fr_rp = Ft_rp * math.tan(a)
+    Fn_sp = Ft_sp / math.cos(a)
+    Fn_rp = Ft_rp / math.cos(a)
+    return dict(Ft_SP=Ft_sp, Ft_RP=Ft_rp, Fr_SP=Fr_sp, Fr_RP=Fr_rp,
+                Fn_SP=Fn_sp, Fn_RP=Fn_rp, rbS=rb_s, rbR=rb_r)
 
-def calculate_stress(loads, m, b, zs, zp, zr, material, alpha_deg=20.0,
-                     KA=1.25, KV=1.15, KFbeta=1.20, KFalpha=1.00,
-                     KHbeta=1.25, KHalpha=1.00, theta_deg=120.0):
-    """Calculate bending and contact stresses (ISO-6336 simplified)"""
-    
-    # Tooth form factors (simplified Lewis-type values)
-    YFaS = 2.8; YSaS = 1.55
-    YFaP_SP = 2.5; YSaP_SP = 1.60
-    YFaP_RP = 2.35; YSaP_RP = 1.60
+def gear_stress(loads, m, b, zs, zp, zr, material, alpha_deg=20.0,
+                KA=1.25, KV=1.15, KFbeta=1.20, KFalpha=1.00,
+                KHbeta=1.25, KHalpha=1.00, Kp=1.10, theta_deg=120.0):
+    """Calculate bending and contact stresses"""
+    YFaS, YSaS = 2.8, 1.55
+    YFaP_SP, YSaP_SP = 2.5, 1.60
+    YFaP_RP, YSaP_RP = 2.35, 1.60
     Yeps, Ybeta = 0.85, 1.0
-    
-    # Contact zone factors
     ZH, Zeps, Zbeta = 2.5, 0.90, 1.0
-    
-    alpha = math.radians(alpha_deg)
-    Ftsp, Ftrp = loads["Ft_SP"], loads["Ft_RP"]
-    
-    # Bending stresses
-    common = KA * KV * KFbeta * KFalpha
-    sF_sp = (Ftsp * common / (b * m)) * YFaS * YSaS * Yeps * Ybeta
-    sF_rp = (Ftrp * common / (b * m)) * YFaP_RP * YSaP_RP * Yeps * Ybeta
-    
-    # Combined planet bending stress
-    theta = math.radians(theta_deg)
-    sF_planet = math.sqrt(max(sF_sp**2 + sF_rp**2 - 
-                              2 * sF_sp * sF_rp * math.cos(theta), 0.0))
-    
-    # Contact stresses
-    ZE = math.sqrt(1.0 / (PI * ((1 - material["nu"]**2) / material["E"] +
-                                (1 - material["nu"]**2) / material["E"])))
-    
-    u_sp = zp / zs
-    u_rp = zr / zp
-    dS, dP = zs * m, zp * m
-    
-    term_sp = (Ftsp * KA * KV * KHbeta * KHalpha) / (b * dS) * ((u_sp + 1) / u_sp)
-    term_rp = (Ftrp * KA * KV * KHbeta * KHalpha) / (b * dP) * (max(u_rp - 1, 1e-9) / u_rp)
-    
-    sH_sp = ZH * ZE * Zeps * Zbeta * math.sqrt(max(term_sp, 0.0))
-    sH_rp = ZH * ZE * Zeps * Zbeta * math.sqrt(max(term_rp, 0.0))
-    
-    # Resultant planet pin load
-    Fnsp, Fnrp = loads["Fn_SP"], loads["Fn_RP"]
-    Fpin = math.sqrt(max(Fnsp**2 + Fnrp**2 - 
-                         2 * Fnsp * Fnrp * math.cos(theta), 0.0))
-    
-    # Safety factors
-    sf_bending_sun = material["sigmaF"] / max(sF_sp, 1e-9)
-    sf_bending_planet = material["sigmaF"] / max(sF_planet, 1e-9)
-    sf_contact_sun = material["sigmaH"] / max(sH_sp, 1e-9)
-    sf_contact_ring = material["sigmaH"] / max(sH_rp, 1e-9)
-    
-    return {
-        "sigmaF_SP": sF_sp, "sigmaF_RP": sF_rp, "sigmaF_planet": sF_planet,
-        "sigmaH_SP": sH_sp, "sigmaH_RP": sH_rp,
-        "SF_bending_sun": sf_bending_sun, "SF_bending_planet": sf_bending_planet,
-        "SF_contact_sun": sf_contact_sun, "SF_contact_ring": sf_contact_ring,
-        "F_pin": Fpin
-    }
+    a = math.radians(alpha_deg)
+    Ftsp, Ftrp = loads['Ft_SP'], loads['Ft_RP']
+    common = KA*KV*KFbeta*KFalpha
+    sF_sp = (Ftsp*common/(b*m))*YFaS*YSaS*Yeps*Ybeta
+    sF_rp = (Ftrp*common/(b*m))*YFaP_RP*YSaP_RP*Yeps*Ybeta
+    sF_planet = math.sqrt(max(sF_sp**2 + sF_rp**2 - 2*sF_sp*sF_rp*math.cos(math.radians(theta_deg)), 0.0))
+
+    ZE = math.sqrt(1.0/(PI*((1-material['nu']**2)/material['E'] + (1-material['nu']**2)/material['E'])))
+    u_sp = zp/zs
+    u_rp = zr/zp
+    dS, dP = zs*m, zp*m
+    term_sp = (Ftsp*KA*KV*KHbeta*KHalpha)/(b*dS) * ((u_sp+1)/u_sp)
+    term_rp = (Ftrp*KA*KV*KHbeta*KHalpha)/(b*dP) * (max(u_rp-1, 1e-9)/u_rp)
+    sH_sp = ZH*ZE*Zeps*Zbeta*math.sqrt(max(term_sp, 0.0))
+    sH_rp = ZH*ZE*Zeps*Zbeta*math.sqrt(max(term_rp, 0.0))
+
+    Fnsp, Fnrp = loads['Fn_SP'], loads['Fn_RP']
+    Fpin = math.sqrt(max(Fnsp**2 + Fnrp**2 - 2*Fnsp*Fnrp*math.cos(math.radians(theta_deg)), 0.0))
+    return dict(sigmaF_SP=sF_sp, sigmaF_RP=sF_rp, sigmaF_planet=sF_planet,
+                sigmaH_SP=sH_sp, sigmaH_RP=sH_rp, F_pin=Fpin)
 
 # ================================================================
-# COMPONENT SIZING CALCULATIONS
+# SHAFT & PIN SIZING
 # ================================================================
-def calculate_component_dimensions(zs, zp, zr, m, b, d_sun, d_planet, d_ring,
-                                   d_in_shaft, d_out_shaft, d_pin, max_od=200.0,
-                                   pin_span=30.0, nplanets=3):
+def shaft_diameter(T_Nm, M_Nm, tau_allow, Kb=1.5, Kt=1.2, Kw=1.3):
+    """ASME combined torsion + bending shaft sizing"""
+    T = T_Nm*1000.0
+    M = M_Nm*1000.0
+    Te = math.sqrt((Kb*M)**2 + (Kt*Kw*T)**2)
+    d = (16*Te/(PI*tau_allow))**(1/3)
+    return d, Te/1000.0
+
+def pin_design(F, support_span, sigma_b, tau, bearing_p, safety=1.5):
+    """Planet pin sizing"""
+    Fd = F*safety
+    Mmax = Fd*support_span/4.0
+    V = Fd/2.0
+    db = (32*Mmax/(PI*sigma_b))**(1/3)
+    ds = math.sqrt(4*V/(PI*tau))
+    d = max(db, ds)
+    p = Fd/(d*support_span*0.55)
+    return dict(F_design=Fd, Mmax=Mmax, V=V, d_bend=db, d_shear=ds,
+                d_pin=d, p_bearing=p, pressure_ok=p <= bearing_p)
+
+# ================================================================
+# COMPONENT DIMENSIONS (ENHANCED)
+# ================================================================
+def component_dimensions(zs, zp, zr, m, b, d_sun, d_planet, d_ring,
+                         d_in_shaft, d_out_shaft, d_pin, max_od=200.0,
+                         pin_span=30.0, design_out=75.0, nplanets=3):
     """Calculate complete physical dimensions for every component"""
     
-    result = {}
-    
-    # ---- Sun Gear ----
+    # Sun Gear
     sun_bore = d_in_shaft + 2.0
-    sun_hub_od = max(sun_bore + 6.0, d_in_shaft * 1.6)
-    sun_hub_len = max(1.2 * d_in_shaft, b)
-    sun_face_width = b
-    sun_rim_thick = (sun_hub_od - sun_bore) / 2.0
-    sun_web_thick = max(4.0, 0.15 * b)
-    sun_hub_diameter = sun_hub_od
-    result["sun_gear"] = {
-        "face_width": sun_face_width,
-        "bore_d": sun_bore,
-        "hub_od": sun_hub_od,
-        "hub_length": sun_hub_len,
-        "rim_thickness": sun_rim_thick,
-        "web_thickness": sun_web_thick,
-        "hub_diameter": sun_hub_diameter,
-        "total_height": b + sun_hub_len
-    }
+    sun_hub_od = max(sun_bore + 6.0, d_in_shaft*1.6)
+    sun_hub_len = max(1.2*d_in_shaft, b)
+    sun_rim_thick = (sun_hub_od - sun_bore)/2.0
+    sun_web_thick = max(4.0, 0.15*b)
     
-    # ---- Planet Gear ----
+    # Planet Gear
     planet_bore = d_pin + 2.0
-    planet_hub_od = max(planet_bore + 4.0, d_pin * 1.45)
-    planet_hub_len = max(b, pin_span * 0.75)
-    planet_face_width = b
-    planet_rim_thick = (planet_hub_od - planet_bore) / 2.0
-    planet_hub_diameter = planet_hub_od
-    result["planet_gear"] = {
-        "face_width": planet_face_width,
-        "bore_d": planet_bore,
-        "hub_od": planet_hub_od,
-        "hub_length": planet_hub_len,
-        "rim_thickness": planet_rim_thick,
-        "hub_diameter": planet_hub_diameter,
-        "total_height": b + planet_hub_len
-    }
+    planet_hub_od = max(planet_bore + 4.0, d_pin*1.45)
+    planet_hub_len = max(b, pin_span*0.75)
+    planet_rim_thick = (planet_hub_od - planet_bore)/2.0
     
-    # ---- Ring Gear ----
-    ring_tooth_tip_d = d_ring - 2.0 * m
-    ring_tooth_root_d = d_ring + 2.5 * m
-    ring_radial_rim = max(0.18 * d_ring, 8.0)
-    ring_outer_d = ring_tooth_root_d + 2.0 * ring_radial_rim
-    ring_inner_d = ring_tooth_root_d
-    ring_wall = (ring_outer_d - ring_inner_d) / 2.0
+    # Ring Gear
+    ring_tooth_tip_d = d_ring - 2*m
+    ring_tooth_root_d = d_ring + 2.5*m
+    ring_radial_rim = max(0.18*d_ring, 8.0)
+    ring_outer_d = ring_tooth_root_d + 2*ring_radial_rim
+    ring_wall = (ring_outer_d - ring_tooth_root_d)/2
     ring_face_width = b + 2.0
-    ring_height = ring_face_width
-    ring_stiffener_thick = max(4.0, 0.12 * ring_face_width)
-    ring_bolting_flange_od = ring_outer_d + 8.0
-    ring_flange_thick = max(5.0, 0.08 * ring_face_width)
-    result["ring_gear"] = {
-        "inner_tooth_tip_d": ring_tooth_tip_d,
-        "inner_tooth_root_d": ring_tooth_root_d,
-        "outer_d": ring_outer_d,
-        "wall_thickness": ring_wall,
-        "face_width": ring_face_width,
-        "total_height": ring_height,
-        "stiffener_thickness": ring_stiffener_thick,
-        "flange_od": ring_bolting_flange_od,
-        "flange_thickness": ring_flange_thick
-    }
+    ring_stiffener_thick = max(4.0, 0.12*ring_face_width)
+    ring_flange_od = ring_outer_d + 8.0
+    ring_flange_thick = max(5.0, 0.08*ring_face_width)
     
-    # ---- Carrier ----
-    carrier_pitch_radius = (d_sun + d_planet) / 2.0
-    carrier_arm_radius = carrier_pitch_radius
-    carrier_plate_thk = max(6.0, 0.30 * b, 0.20 * d_pin)
-    carrier_od = min(max_od - 4.0, 2.0 * (carrier_pitch_radius + 1.6 * d_pin))
+    # Carrier
+    carrier_pitch_radius = (d_sun + d_planet)/2.0
+    carrier_plate_thk = max(6.0, 0.30*b, 0.20*d_pin)
+    carrier_od = min(max_od-4.0, 2*(carrier_pitch_radius + 1.6*d_pin))
     carrier_bore = d_out_shaft + 2.0
-    carrier_hub_od = max(d_out_shaft + 8.0, d_out_shaft * 1.5)
-    carrier_hub_len = max(1.5 * d_out_shaft, 1.5 * b)
+    carrier_hub_od = max(d_out_shaft + 8.0, d_out_shaft*1.5)
+    carrier_hub_len = max(1.5*d_out_shaft, 1.5*b)
     carrier_pin_boss_od = d_pin + 6.0
-    carrier_pin_boss_len = max(6.0, 0.5 * d_pin)
-    carrier_arm_width = max(6.0, 0.25 * carrier_plate_thk)
-    carrier_arm_depth = max(8.0, 0.8 * d_pin)
-    carrier_total_height = carrier_plate_thk + carrier_hub_len + 2 * carrier_pin_boss_len
-    result["carrier"] = {
-        "plate_thickness": carrier_plate_thk,
-        "plate_od": carrier_od,
-        "output_bore": carrier_bore,
-        "hub_od": carrier_hub_od,
-        "hub_length": carrier_hub_len,
-        "planet_pin_circle_d": 2.0 * carrier_pitch_radius,
-        "arm_center_radius": carrier_arm_radius,
-        "pin_boss_od": carrier_pin_boss_od,
-        "pin_boss_length": carrier_pin_boss_len,
-        "arm_width": carrier_arm_width,
-        "arm_depth": carrier_arm_depth,
-        "total_height": carrier_total_height
-    }
+    carrier_pin_boss_len = max(6.0, 0.5*d_pin)
+    carrier_arm_width = max(6.0, 0.25*carrier_plate_thk)
+    carrier_arm_depth = max(8.0, 0.8*d_pin)
+    carrier_total_height = carrier_plate_thk + carrier_hub_len + 2*carrier_pin_boss_len
     
-    # ---- Input Shaft ----
+    # Shafts
     input_shaft_len = 40.0 + b + 20.0
-    input_shaft_d = d_in_shaft
-    input_key_width = 0.25 * d_in_shaft if d_in_shaft < 30.0 else 8.0
-    input_key_depth = 0.15 * d_in_shaft if d_in_shaft < 30.0 else 5.0
-    input_shaft_shoulder_d = d_in_shaft * 1.2
-    result["input_shaft"] = {
-        "diameter": input_shaft_d,
-        "length": input_shaft_len,
-        "key_width": input_key_width,
-        "key_depth": input_key_depth,
-        "shoulder_diameter": input_shaft_shoulder_d
-    }
+    input_key_width = 0.25*d_in_shaft if d_in_shaft < 30.0 else 8.0
+    input_key_depth = 0.15*d_in_shaft if d_in_shaft < 30.0 else 5.0
     
-    # ---- Output Shaft ----
     output_shaft_len = 40.0 + b + 20.0 + 30.0
-    output_shaft_d = d_out_shaft
-    output_key_width = 0.25 * d_out_shaft if d_out_shaft < 30.0 else 10.0
-    output_key_depth = 0.15 * d_out_shaft if d_out_shaft < 30.0 else 6.0
-    output_shaft_shoulder_d = d_out_shaft * 1.2
-    result["output_shaft"] = {
-        "diameter": output_shaft_d,
-        "length": output_shaft_len,
-        "key_width": output_key_width,
-        "key_depth": output_key_depth,
-        "shoulder_diameter": output_shaft_shoulder_d
-    }
+    output_key_width = 0.25*d_out_shaft if d_out_shaft < 30.0 else 10.0
+    output_key_depth = 0.15*d_out_shaft if d_out_shaft < 30.0 else 6.0
     
-    # ---- Planet Pin ----
-    pin_head_d = d_pin * 1.3
-    pin_head_thick = max(3.0, 0.2 * d_pin)
-    pin_total_len = pin_span + 2.0 * pin_head_thick
-    result["planet_pin"] = {
-        "diameter": d_pin,
-        "span_length": pin_span,
-        "head_diameter": pin_head_d,
-        "head_thickness": pin_head_thick,
-        "total_length": pin_total_len
-    }
+    # Planet Pin
+    pin_head_d = d_pin*1.3
+    pin_head_thick = max(3.0, 0.2*d_pin)
+    pin_total_len = pin_span + 2*pin_head_thick
     
-    # ---- Housing ----
+    # Housing
     housing_clearance = 2.0
-    envelope_od = ring_outer_d + 2.0 * housing_clearance
-    housing_wall = max(3.0, 0.06 * envelope_od)
+    envelope_od = ring_outer_d + 2*housing_clearance
+    housing_wall = max(3.0, 0.06*envelope_od)
     housing_length = input_shaft_len + b + output_shaft_len
-    housing_flange_od = envelope_od + 2.0 * housing_wall
-    housing_base_thick = max(5.0, 0.15 * housing_wall)
-    result["housing"] = {
-        "outer_d": envelope_od,
-        "wall_thickness": housing_wall,
-        "length": housing_length,
-        "flange_od": housing_flange_od,
-        "base_thickness": housing_base_thick,
-        "inner_d": envelope_od - 2.0 * housing_wall
-    }
+    housing_flange_od = envelope_od + 2*housing_wall
+    housing_base_thick = max(5.0, 0.15*housing_wall)
     
-    return result
+    return {
+        'sun': {
+            'gear_face_width': b, 'bore_d': sun_bore, 'hub_od': sun_hub_od,
+            'hub_length': sun_hub_len, 'rim_thickness': sun_rim_thick,
+            'web_thickness': sun_web_thick, 'total_height': b + sun_hub_len
+        },
+        'planet': {
+            'gear_face_width': b, 'bore_d': planet_bore, 'hub_od': planet_hub_od,
+            'hub_length': planet_hub_len, 'rim_thickness': planet_rim_thick,
+            'total_height': b + planet_hub_len
+        },
+        'ring': {
+            'inner_tooth_tip_d': ring_tooth_tip_d, 'inner_tooth_root_d': ring_tooth_root_d,
+            'outer_d': ring_outer_d, 'wall_thickness': ring_wall,
+            'face_width': ring_face_width, 'total_height': ring_face_width,
+            'stiffener_thickness': ring_stiffener_thick,
+            'flange_od': ring_flange_od, 'flange_thickness': ring_flange_thick
+        },
+        'carrier': {
+            'plate_thickness': carrier_plate_thk, 'plate_od': carrier_od,
+            'output_bore': carrier_bore, 'hub_od': carrier_hub_od,
+            'hub_length': carrier_hub_len, 'planet_pin_circle_d': 2*carrier_pitch_radius,
+            'pin_boss_od': carrier_pin_boss_od, 'pin_boss_length': carrier_pin_boss_len,
+            'arm_width': carrier_arm_width, 'arm_depth': carrier_arm_depth,
+            'total_height': carrier_total_height
+        },
+        'input_shaft': {
+            'diameter': d_in_shaft, 'length': input_shaft_len,
+            'key_width': input_key_width, 'key_depth': input_key_depth
+        },
+        'output_shaft': {
+            'diameter': d_out_shaft, 'length': output_shaft_len,
+            'key_width': output_key_width, 'key_depth': output_key_depth
+        },
+        'planet_pin': {
+            'diameter': d_pin, 'span_length': pin_span,
+            'head_diameter': pin_head_d, 'head_thickness': pin_head_thick,
+            'total_length': pin_total_len
+        },
+        'housing': {
+            'outer_d': envelope_od, 'wall_thickness': housing_wall,
+            'length': housing_length, 'flange_od': housing_flange_od,
+            'base_thickness': housing_base_thick,
+            'inner_d': envelope_od - 2*housing_wall
+        }
+    }
 
 # ================================================================
 # DEFLECTION CALCULATIONS
@@ -423,110 +548,68 @@ def calculate_component_dimensions(zs, zp, zr, m, b, d_sun, d_planet, d_ring,
 def calculate_deflections(loads, b, m, zs, zr, material, d_in_shaft, d_out_shaft,
                           pin_span, d_pin, carrier_plate_thk):
     """Calculate deflections for critical components"""
-    
     E = material["E"]
+    nu = material["nu"]
     
-    # Sun gear deflection (simplified - radial deflection under load)
+    # Sun gear deflection
     rb_s = (zs * m / 2.0) * math.cos(math.radians(DEFAULT_ALPHA))
     Ft_sp = loads["Ft_SP"]
-    # Simplification: sun deflection approximated as cantilever
     sun_span = b * 0.5
     I_sun = PI * rb_s**4 / 4.0
-    sun_deflection = (Ft_sp * sun_span**3) / (3 * E * I_sun) * 1000.0  # mm
+    sun_deflection = (Ft_sp * sun_span**3) / (3 * E * I_sun) * 1000.0
     
     # Ring gear deflection
-    ring_span = b * 0.5
     rb_r = (zr * m / 2.0) * math.cos(math.radians(DEFAULT_ALPHA))
     I_ring = PI * (rb_r**4 - (rb_r - 0.18 * rb_r)**4) / 4.0
     Ft_rp = loads["Ft_RP"]
-    ring_deflection = (Ft_rp * ring_span**3) / (3 * E * I_ring) * 1000.0  # mm
+    ring_deflection = (Ft_rp * (b*0.5)**3) / (3 * E * I_ring) * 1000.0
     
     # Carrier deflection
-    carrier_span = pin_span * 0.75
-    F_pin = loads["Fn_SP"] + loads["Fn_RP"]  # approximation
-    I_carrier = (carrier_plate_thk**3 / 12.0) * 20.0  # approximate
-    carrier_deflection = (F_pin * carrier_span**3) / (48 * E * I_carrier) * 1000.0  # mm
+    F_pin = loads["Fn_SP"] + loads["Fn_RP"]
+    I_carrier = (carrier_plate_thk**3 / 12.0) * 20.0
+    carrier_deflection = (F_pin * (pin_span*0.75)**3) / (48 * E * I_carrier) * 1000.0
     
     # Shaft torsional deflection
-    G = E / (2 * (1 + material["nu"]))
-    T_in = loads["Ft_SP"] * (zs * m / 2.0) / 1000.0  # N.m
-    T_out = loads["Ft_SP"] * (zr * m / 2.0) / 1000.0  # N.m
+    G = E / (2 * (1 + nu))
+    T_in = loads["Ft_SP"] * (zs * m / 2.0) / 1000.0
+    T_out = loads["Ft_SP"] * (zr * m / 2.0) / 1000.0
     
     J_in = PI * d_in_shaft**4 / 32.0
     J_out = PI * d_out_shaft**4 / 32.0
     
-    L_in = 40.0  # mm
-    L_out = 40.0 + b  # mm
+    theta_in = (T_in * 1000.0 * 40.0) / (G * J_in)
+    theta_out = (T_out * 1000.0 * (40.0 + b)) / (G * J_out)
     
-    theta_in = (T_in * 1000.0 * L_in) / (G * J_in)  # rad
-    theta_out = (T_out * 1000.0 * L_out) / (G * J_out)  # rad
-    
-    theta_in_deg = math.degrees(theta_in)
-    theta_out_deg = math.degrees(theta_out)
-    
-    # Tooth deflection (simplified - elastic deformation at contact)
+    # Tooth deflection
     F_n = loads["Fn_SP"]
     tooth_height = 2.5 * m
     tooth_width = m
     I_tooth = tooth_width * tooth_height**3 / 12.0
-    tooth_deflection = (F_n * tooth_height**3) / (3 * E * I_tooth) * 1000.0  # mm
+    tooth_deflection = (F_n * tooth_height**3) / (3 * E * I_tooth) * 1000.0
     
     return {
         "sun_deflection": sun_deflection,
         "ring_deflection": ring_deflection,
         "carrier_deflection": carrier_deflection,
-        "shaft_torsional_angle_input": theta_in_deg,
-        "shaft_torsional_angle_output": theta_out_deg,
+        "shaft_torsional_angle_input": math.degrees(theta_in),
+        "shaft_torsional_angle_output": math.degrees(theta_out),
         "tooth_deflection": tooth_deflection
     }
 
 # ================================================================
-# SHAFT & PIN SIZING
-# ================================================================
-def shaft_diameter(T_Nm, M_Nm, tau_allow, Kb=1.5, Kt=1.2, Kw=1.3):
-    """ASME combined torsion + bending shaft sizing"""
-    T = T_Nm * 1000.0
-    M = M_Nm * 1000.0
-    Te = math.sqrt((Kb * M)**2 + (Kt * Kw * T)**2)
-    d = (16.0 * Te / (PI * tau_allow)) ** (1.0 / 3.0)
-    return d, Te / 1000.0
-
-def pin_design(F, support_span, sigma_b, tau, bearing_p, safety=1.5):
-    """Planet pin sizing"""
-    Fd = F * safety
-    Mmax = Fd * support_span / 4.0
-    V = Fd / 2.0
-    
-    db = (32.0 * Mmax / (PI * sigma_b)) ** (1.0 / 3.0)
-    ds = math.sqrt(4.0 * V / (PI * tau))
-    d = max(db, ds)
-    
-    p = Fd / (d * support_span * 0.55)
-    
-    return {
-        "F_design": Fd, "Mmax": Mmax, "V": V,
-        "d_bend": db, "d_shear": ds, "d_pin": d,
-        "p_bearing": p, "pressure_ok": p <= bearing_p
-    }
-
-# ================================================================
-# BEARING LIFE CALCULATIONS
+# BEARING LIFE & THERMAL
 # ================================================================
 def bearing_L10_life(C_dyn, P_equiv, n_rpm, bearing_type="Ball"):
-    """Lundberg-Palmgren L10 life calculation"""
-    p = 3.0 if bearing_type == "Ball" else 10.0 / 3.0
+    """Lundberg-Palmgren L10 life"""
+    p = 3.0 if bearing_type == "Ball" else 10.0/3.0
     if P_equiv <= 0 or n_rpm <= 0:
         return {"L10_Mrev": float('inf'), "L10_h": float('inf')}
     L10_Mrev = (C_dyn / P_equiv) ** p
     L10_h = (L10_Mrev * 1e6) / (60.0 * n_rpm)
     return {"L10_Mrev": L10_Mrev, "L10_h": L10_h}
 
-# ================================================================
-# THERMAL CALCULATION
-# ================================================================
 def calculate_thermal(power_loss_W, housing_area_m2, ambient_C=25.0, h_coeff=15.0):
-    """Calculate steady-state temperature rise"""
-    # Power loss in Watts, housing area in m²
+    """Thermal analysis"""
     delta_T = power_loss_W / (h_coeff * housing_area_m2)
     T_steady = ambient_C + delta_T
     return {
@@ -534,86 +617,239 @@ def calculate_thermal(power_loss_W, housing_area_m2, ambient_C=25.0, h_coeff=15.
         "housing_area_m2": housing_area_m2,
         "delta_T": delta_T,
         "steady_state_T": T_steady,
-        "thermal_ok": T_steady < 90.0  # Typical limit for mineral oil
+        "thermal_ok": T_steady < 90.0
     }
 
 # ================================================================
-# PLOTTING FUNCTIONS
+# 3D VISUALIZATION FUNCTIONS
 # ================================================================
-def create_gearbox_schematic(geom_sun, geom_planet, geom_ring, nplanets, d_pin):
-    """Create a 2D schematic of the planetary gearbox"""
-    fig, ax = plt.subplots(figsize=(8, 8))
+def create_assembly_3d(zs, zp, zr, m, n_planets, d_pin, face_width, d_in_shaft, d_out_shaft,
+                        sun_geometry, planet_geometry, ring_geometry, comp_dims):
+    """Create 3D assembly visualization"""
     
-    rS = geom_sun["pitch_d"] / 2.0
-    rP = geom_planet["pitch_d"] / 2.0
-    rR = geom_ring["pitch_d"] / 2.0
-    rCarrier = rS + rP
+    # Generate sun gear
+    sun_mesh = gear_solid_3d(zs, m, DEFAULT_ALPHA, face_width,
+                            hub_dia=comp_dims['sun']['hub_od'],
+                            bore_dia=comp_dims['sun']['bore_d'])
     
-    # Draw ring gear
-    theta = np.linspace(0, 2*PI, 200)
-    ring_outer = rR + 8.0
-    ring_inner = rR - 8.0
-    ax.fill(ring_outer * np.cos(theta), ring_outer * np.sin(theta),
-            color='gray', alpha=0.7, label='Ring Gear')
-    ax.fill(ring_inner * np.cos(theta), ring_inner * np.sin(theta),
-            color='white', alpha=0.9)
+    # Generate planet gears
+    planet_meshes = []
+    pitch_radius = (sun_geometry['pitch_d'] + planet_geometry['pitch_d']) / 2.0
     
-    # Draw sun gear
-    ax.fill(rS * np.cos(theta), rS * np.sin(theta), color='#D9531E', label='Sun')
-    
-    # Draw planets
-    for k in range(nplanets):
-        angle = k * 2 * PI / nplanets
-        pX = rCarrier * math.cos(angle)
-        pY = rCarrier * math.sin(angle)
+    for k in range(n_planets):
+        angle = k * 2 * PI / n_planets
+        # Generate planet mesh
+        planet_mesh = gear_solid_3d(zp, m, DEFAULT_ALPHA, face_width,
+                                   hub_dia=comp_dims['planet']['hub_od'],
+                                   bore_dia=comp_dims['planet']['bore_d'])
         
-        # Planet gear
-        planet_theta = np.linspace(0, 2*PI, 100)
-        planet_x = pX + rP * np.cos(planet_theta)
-        planet_y = pY + rP * np.sin(planet_theta)
-        ax.fill(planet_x, planet_y, color='#EDB120', edgecolor='k', label='Planet' if k == 0 else "")
-        
-        # Planet pin
-        pin_r = d_pin / 2.0
-        pin_x = pX + pin_r * np.cos(planet_theta)
-        pin_y = pY + pin_r * np.sin(planet_theta)
-        ax.fill(pin_x, pin_y, color='#3B3B3B', label='Pin' if k == 0 else "")
-        
-        # Carrier arm
-        ax.plot([0, pX], [0, pY], 'b-', linewidth=2)
+        # Rotate and translate planet
+        c, s = math.cos(angle), math.sin(angle)
+        px, py = pitch_radius * c, pitch_radius * s
+        vx, vy, vz, I, J, K = planet_mesh
+        vx = vx + px
+        vy = vy + py
+        planet_meshes.append((vx, vy, vz, I, J, K))
+    
+    # Generate ring gear
+    ring_mesh = ring_gear_solid_3d(zr, m, DEFAULT_ALPHA, face_width + 2.0,
+                                   outer_dia=comp_dims['ring']['outer_d'])
+    
+    # Generate carrier
+    carrier_mesh = carrier_solid_3d(
+        pitch_radius, d_pin, n_planets, comp_dims['carrier']['plate_thickness'],
+        comp_dims['carrier']['hub_od'], comp_dims['carrier']['output_bore']
+    )
+    
+    # Generate shafts
+    input_shaft = shaft_solid_3d(d_in_shaft, 40.0)
+    output_shaft = shaft_solid_3d(d_out_shaft, 40.0 + face_width)
+    
+    # Generate pins
+    pins = []
+    for k in range(n_planets):
+        angle = k * 2 * PI / n_planets
+        pin_mesh = planet_pin_solid_3d(d_pin, comp_dims['planet_pin']['total_length'])
+        c, s = math.cos(angle), math.sin(angle)
+        px, py = pitch_radius * c, pitch_radius * s
+        vx, vy, vz, I, J, K = pin_mesh
+        vx = vx + px
+        vy = vy + py
+        pins.append((vx, vy, vz, I, J, K))
+    
+    # Create Plotly traces
+    traces = []
+    
+    # Sun gear
+    traces.append(go.Mesh3d(
+        x=sun_mesh[0], y=sun_mesh[1], z=sun_mesh[2],
+        i=sun_mesh[3], j=sun_mesh[4], k=sun_mesh[5],
+        color='#D9531E', opacity=0.9, name='Sun Gear',
+        flatshading=True
+    ))
+    
+    # Planet gears
+    for idx, planet_mesh in enumerate(planet_meshes):
+        traces.append(go.Mesh3d(
+            x=planet_mesh[0], y=planet_mesh[1], z=planet_mesh[2],
+            i=planet_mesh[3], j=planet_mesh[4], k=planet_mesh[5],
+            color='#EDB120', opacity=0.9, name=f'Planet {idx+1}',
+            flatshading=True
+        ))
+    
+    # Ring gear
+    traces.append(go.Mesh3d(
+        x=ring_mesh[0], y=ring_mesh[1], z=ring_mesh[2],
+        i=ring_mesh[3], j=ring_mesh[4], k=ring_mesh[5],
+        color='#8a8a8a', opacity=0.7, name='Ring Gear',
+        flatshading=True
+    ))
     
     # Carrier
-    ax.plot(0, 0, 'k+', markersize=12, markeredgewidth=2)
-    ax.set_aspect('equal')
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='upper right')
-    ax.set_xlim([-ring_outer*1.15, ring_outer*1.15])
-    ax.set_ylim([-ring_outer*1.15, ring_outer*1.15])
-    ax.set_title(f"Planetary Gearbox - 1:{DEFAULT_RATIO:.0f} (Ring Fixed)")
+    traces.append(go.Mesh3d(
+        x=carrier_mesh[0], y=carrier_mesh[1], z=carrier_mesh[2],
+        i=carrier_mesh[3], j=carrier_mesh[4], k=carrier_mesh[5],
+        color='#4C72B0', opacity=0.6, name='Carrier',
+        flatshading=True
+    ))
+    
+    # Input shaft
+    traces.append(go.Mesh3d(
+        x=input_shaft[0], y=input_shaft[1], z=input_shaft[2],
+        i=input_shaft[3], j=input_shaft[4], k=input_shaft[5],
+        color='#8C8C8C', opacity=0.9, name='Input Shaft',
+        flatshading=True
+    ))
+    
+    # Output shaft
+    traces.append(go.Mesh3d(
+        x=output_shaft[0], y=output_shaft[1], z=output_shaft[2],
+        i=output_shaft[3], j=output_shaft[4], k=output_shaft[5],
+        color='#8C8C8C', opacity=0.9, name='Output Shaft',
+        flatshading=True
+    ))
+    
+    # Pins
+    for idx, pin_mesh in enumerate(pins):
+        traces.append(go.Mesh3d(
+            x=pin_mesh[0], y=pin_mesh[1], z=pin_mesh[2],
+            i=pin_mesh[3], j=pin_mesh[4], k=pin_mesh[5],
+            color='#3B3B3B', opacity=0.9, name=f'Pin {idx+1}',
+            flatshading=True
+        ))
+    
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='X (mm)', yaxis_title='Y (mm)', zaxis_title='Z (mm)',
+            aspectmode='data',
+            camera=dict(eye=dict(x=1.5, y=1.5, z=0.8))
+        ),
+        title='3D Planetary Gearbox Assembly',
+        height=700,
+        margin=dict(l=0, r=0, t=40, b=0)
+    )
     
     return fig
 
-# ================================================================
-# HELPER FUNCTION TO CONVERT DICTIONARY TO DATAFRAME
-# ================================================================
-def components_to_dataframe(components_dict):
-    """Convert component dimensions dictionary to DataFrame"""
-    rows = []
-    for component, dims in components_dict.items():
-        for param, value in dims.items():
-            rows.append({
-                "Component": component.replace('_', ' ').title(),
-                "Parameter": param.replace('_', ' ').title(),
-                "Value": value,
-                "Unit": "mm"
-            })
-    return pd.DataFrame(rows)
+def create_component_3d_view(component_type, params):
+    """Create individual 3D component visualization"""
+    fig = go.Figure()
+    
+    if component_type == 'Sun Gear':
+        mesh = gear_solid_3d(
+            params['z'], params['m'], DEFAULT_ALPHA,
+            params['face_width'], params['hub_od'], params['bore_d']
+        )
+        fig.add_trace(go.Mesh3d(
+            x=mesh[0], y=mesh[1], z=mesh[2],
+            i=mesh[3], j=mesh[4], k=mesh[5],
+            color='#D9531E', opacity=0.9, name='Sun Gear',
+            flatshading=True
+        ))
+        title = f"Sun Gear — z={params['z']}, m={params['m']:.2f}mm"
+    elif component_type == 'Planet Gear':
+        mesh = gear_solid_3d(
+            params['z'], params['m'], DEFAULT_ALPHA,
+            params['face_width'], params['hub_od'], params['bore_d']
+        )
+        fig.add_trace(go.Mesh3d(
+            x=mesh[0], y=mesh[1], z=mesh[2],
+            i=mesh[3], j=mesh[4], k=mesh[5],
+            color='#EDB120', opacity=0.9, name='Planet Gear',
+            flatshading=True
+        ))
+        title = f"Planet Gear — z={params['z']}, m={params['m']:.2f}mm"
+    elif component_type == 'Ring Gear':
+        mesh = ring_gear_solid_3d(
+            params['z'], params['m'], DEFAULT_ALPHA,
+            params['face_width'], params['outer_d']
+        )
+        fig.add_trace(go.Mesh3d(
+            x=mesh[0], y=mesh[1], z=mesh[2],
+            i=mesh[3], j=mesh[4], k=mesh[5],
+            color='#8a8a8a', opacity=0.7, name='Ring Gear',
+            flatshading=True
+        ))
+        title = f"Ring Gear — z={params['z']}, m={params['m']:.2f}mm"
+    elif component_type == 'Carrier':
+        mesh = carrier_solid_3d(
+            params['pitch_radius'], params['d_pin'], params['n_planets'],
+            params['plate_thickness'], params['hub_od'], params['bore_d']
+        )
+        fig.add_trace(go.Mesh3d(
+            x=mesh[0], y=mesh[1], z=mesh[2],
+            i=mesh[3], j=mesh[4], k=mesh[5],
+            color='#4C72B0', opacity=0.6, name='Carrier',
+            flatshading=True
+        ))
+        title = "Carrier Plate"
+    elif component_type == 'Input Shaft':
+        mesh = shaft_solid_3d(params['diameter'], params['length'])
+        fig.add_trace(go.Mesh3d(
+            x=mesh[0], y=mesh[1], z=mesh[2],
+            i=mesh[3], j=mesh[4], k=mesh[5],
+            color='#8C8C8C', opacity=0.9, name='Input Shaft',
+            flatshading=True
+        ))
+        title = f"Input Shaft — ⌀{params['diameter']:.1f}mm"
+    elif component_type == 'Output Shaft':
+        mesh = shaft_solid_3d(params['diameter'], params['length'])
+        fig.add_trace(go.Mesh3d(
+            x=mesh[0], y=mesh[1], z=mesh[2],
+            i=mesh[3], j=mesh[4], k=mesh[5],
+            color='#8C8C8C', opacity=0.9, name='Output Shaft',
+            flatshading=True
+        ))
+        title = f"Output Shaft — ⌀{params['diameter']:.1f}mm"
+    elif component_type == 'Planet Pin':
+        mesh = planet_pin_solid_3d(params['diameter'], params['length'])
+        fig.add_trace(go.Mesh3d(
+            x=mesh[0], y=mesh[1], z=mesh[2],
+            i=mesh[3], j=mesh[4], k=mesh[5],
+            color='#3B3B3B', opacity=0.9, name='Planet Pin',
+            flatshading=True
+        ))
+        title = f"Planet Pin — ⌀{params['diameter']:.1f}mm"
+    
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='X (mm)', yaxis_title='Y (mm)', zaxis_title='Z (mm)',
+            aspectmode='data',
+            camera=dict(eye=dict(x=1.3, y=1.3, z=0.7))
+        ),
+        title=title,
+        height=500,
+        margin=dict(l=0, r=0, t=40, b=0)
+    )
+    
+    return fig
 
 # ================================================================
 # STREAMLIT APP
 # ================================================================
 st.set_page_config(
-    page_title="Planetary Gearbox Designer",
+    page_title="Planetary Gearbox Designer v3",
     page_icon="⚙️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -659,8 +895,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">⚙️ PLANETARY GEARBOX DESIGN PLATFORM</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Complete Single-Stage 1:9 Reduction — All Component Calculations</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">⚙️ PLANETARY GEARBOX DESIGNER v3</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Complete Single-Stage 1:9 Reduction — All Component Calculations + 3D Visualization</div>', unsafe_allow_html=True)
 
 # ================================================================
 # SIDEBAR — INPUTS
@@ -668,872 +904,436 @@ st.markdown('<div class="sub-header">Complete Single-Stage 1:9 Reduction — All
 with st.sidebar:
     st.header("🔧 Operating Conditions")
     
-    # Operating inputs
-    tin = st.number_input("Input Torque (N·m)", min_value=1.0, max_value=500.0, 
-                          value=5.0, step=0.5, help="Torque at the input shaft")
-    nin = st.number_input("Input Speed (rpm)", min_value=100, max_value=20000,
-                          value=1500, step=50, help="Speed at the input shaft")
-    
-    # Calculated motor power
-    motor_power = tin * 2 * PI * nin / 60.0 / 1000.0  # kW
-    st.metric("Calculated Motor Power", f"{motor_power:.3f} kW")
-    
-    motor_power_manual = st.number_input("Override Motor Power (kW)", 
-                                         min_value=0.1, max_value=100.0,
-                                         value=round(motor_power, 3), step=0.01)
-    
-    design_out = st.slider("Design Output Torque (N·m)", 65.0, 75.0, 75.0, 1.0,
-                           help="Design basis for all strength calculations")
+    tin = st.number_input("Input Torque (N·m)", 0.1, 1000.0, 5.0, 0.1)
+    nin = st.number_input("Input Speed (rpm)", 10.0, 20000.0, 1500.0, 50.0)
+    motor_power_kw = st.number_input("Motor Power (kW)", 0.05, 20.0, 0.785, 0.01)
+    eta = st.number_input("Stage Efficiency", 0.80, 0.99, DEFAULT_ETA, 0.005)
+    design_out = st.slider("Design Output Torque (N·m)", 65.0, 75.0, 75.0, 1.0)
     
     st.header("⚙️ Gear Parameters")
-    ratio_target = st.number_input("Target Ratio", 5.0, 15.0, 9.0, 0.1)
+    ratio_target = st.number_input("Target Ratio", 1.0, 20.0, 9.0, 0.1)
+    nplanets = st.selectbox("Number of Planets", [3, 4, 5], index=0)
+    alpha = st.number_input("Pressure Angle (°)", 14.5, 25.0, 20.0, 0.5)
+    beta = st.number_input("Helix Angle (°)", 0.0, 30.0, 0.0, 1.0)
+    max_od = st.number_input("Max OD (mm)", 50.0, 500.0, 200.0, 1.0)
     
-    # Auto tooth suggestion or manual
-    auto_tooth = st.checkbox("Auto-select teeth", value=True)
+    # Tooth selection mode
+    tooth_mode = st.radio("Tooth Selection:", ["Manual", "Auto Suggest"], index=0)
     
-    if auto_tooth:
-        # Try common combinations for 1:9
-        candidates = []
-        for zs in [18, 19, 20, 21, 22, 24, 25, 26, 28, 30]:
-            for zp in range(17, 100):
-                zr = exact_ring_teeth(zs, zp)
-                ratio = ratio_ring_fixed(zs, zr)
-                if abs(ratio - ratio_target) < 1e-9:
-                    if assembly_ok(zs, zr, DEFAULT_PLANETS) and planet_spacing_ok(zs, zp, DEFAULT_PLANETS):
-                        candidates.append((zs, zp, zr))
-        
-        if candidates:
-            st.write("**Available tooth combinations:**")
-            combo_df = pd.DataFrame(candidates, columns=["Sun", "Planet", "Ring"])
-            selected_idx = st.selectbox(
-                "Select combination",
-                range(len(candidates)),
-                format_func=lambda x: f"S={candidates[x][0]}, P={candidates[x][1]}, R={candidates[x][2]}"
-            )
-            zs, zp, zr = candidates[selected_idx]
-        else:
-            st.warning("No exact 1:9 combo found. Using closest match.")
-            zs, zp = 20, 70
-            zr = exact_ring_teeth(zs, zp)
+    if tooth_mode == "Manual":
+        zs = st.number_input("Sun Teeth Zs", 17, 120, 20, 1)
+        zp = st.number_input("Planet Teeth Zp", 17, 150, 70, 1)
+        module = st.number_input("Module (mm)", 0.5, 10.0, 1.0, 0.05)
     else:
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            zs = st.number_input("Sun Teeth", 17, 120, 20, 1)
-        with col2:
-            zp = st.number_input("Planet Teeth", 17, 150, 70, 1)
-        with col3:
-            zr = exact_ring_teeth(int(zs), int(zp))
-            st.metric("Ring Teeth", zr)
+        cand = suggest_tooth_sets(ratio_target, nplanets, max_od)
+        if cand.empty:
+            st.error("No exact candidates found. Adjust parameters.")
+            st.stop()
+        opt = cand.sort_values(['module', 'zs', 'zp']).iloc[0]
+        zs, zp, module = int(opt.zs), int(opt.zp), float(opt.module)
+        st.info(f"Auto: Zs={zs}, Zp={zp}, m={module:.2f}mm")
     
-    # Module selection
-    st.subheader("Module Selection")
-    module = st.select_slider("Module (mm)", options=MODULES, value=1.0)
+    zr = exact_ring_teeth(int(zs), int(zp))
     
-    # Show resulting diameters
-    st.write(f"**Sun pitch dia:** {zs * module:.1f} mm")
-    st.write(f"**Planet pitch dia:** {zp * module:.1f} mm")
-    st.write(f"**Ring pitch dia:** {zr * module:.1f} mm")
-    
-    # Face width
-    bm_ratio = st.slider("Face Width / Module Ratio", 8.0, 20.0, 12.0, 0.5)
-    b = bm_ratio * module
-    st.write(f"**Face Width:** {b:.1f} mm")
-    
-    st.header("📐 Material Selection")
+    st.header("📐 Material")
     mat_name = st.selectbox("Material", list(MATERIALS.keys()))
     mat = dict(MATERIALS[mat_name])
     
     if mat_name == "Custom":
-        with st.expander("Custom Material Properties", expanded=True):
-            mat["E"] = st.number_input("Young's Modulus E (MPa)", 100000.0, 300000.0, 200000.0)
-            mat["nu"] = st.number_input("Poisson's Ratio ν", 0.2, 0.4, 0.3, 0.01)
-            mat["tau"] = st.number_input("Allowable Shear τ (MPa)", 50.0, 500.0, 180.0)
-            mat["sigmaF"] = st.number_input("Bending Fatigue Limit σF (MPa)", 100.0, 1000.0, 300.0)
-            mat["sigmaH"] = st.number_input("Contact Fatigue Limit σH (MPa)", 300.0, 2500.0, 1200.0)
-            mat["sigma_allow_bend"] = st.number_input("Pin Allowable Bending (MPa)", 50.0, 800.0, 250.0)
-            mat["density"] = st.number_input("Density (kg/m³)", 7000.0, 9000.0, 7850.0)
-            mat["hardness_HB"] = st.number_input("Hardness (HB)", 100.0, 800.0, 500.0)
+        with st.expander("Custom Properties", expanded=True):
+            mat['E'] = st.number_input("E (MPa)", 50000.0, 300000.0, 200000.0)
+            mat['nu'] = st.number_input("ν", 0.20, 0.40, 0.30, 0.01)
+            mat['tau'] = st.number_input("τ (MPa)", 20.0, 500.0, 180.0)
+            mat['sigmaF'] = st.number_input("σF (MPa)", 50.0, 1000.0, 300.0)
+            mat['sigmaH'] = st.number_input("σH (MPa)", 200.0, 2000.0, 1200.0)
+            mat['sigma_allow_bend'] = st.number_input("σBend (MPa)", 50.0, 800.0, 250.0)
     
-    st.header("🔩 Pin & Bearing Parameters")
-    pin_span = st.number_input("Planet Pin Span (mm)", 10.0, 100.0, 30.0, 1.0)
-    bearing_p = st.number_input("Allowable Bearing Pressure (MPa)", 5.0, 80.0, 25.0, 1.0)
-    service_factor = st.number_input("Bearing Service Factor", 1.0, 3.0, 1.5, 0.1)
+    st.header("🔩 Design Factors")
+    Kb = st.number_input("ASME Kb", 1.0, 3.0, 1.5, 0.1)
+    Kt = st.number_input("ASME Kt", 1.0, 2.0, 1.2, 0.1)
+    Kw = st.number_input("Keyway Kw", 1.0, 2.0, 1.3, 0.05)
+    service = st.number_input("Bearing SF", 1.0, 3.0, 1.5, 0.1)
+    pin_span = st.number_input("Pin Span (mm)", 10.0, 100.0, 30.0, 1.0)
+    bearing_p = st.number_input("Pin Pressure (MPa)", 5.0, 80.0, 25.0, 1.0)
+    theta = st.number_input("Force Angle θ (°)", 60.0, 180.0, 120.0, 1.0)
     
-    st.header("🔧 Design Factors")
-    Kb = st.number_input("ASME Bending Factor Kb", 1.0, 3.0, 1.5, 0.1)
-    Kt = st.number_input("ASME Torsion Factor Kt", 1.0, 2.5, 1.2, 0.1)
-    Kw = st.number_input("Keyway Factor Kw", 1.0, 2.0, 1.3, 0.05)
-    theta_deg = st.slider("Mesh Force Angle θ (deg)", 60.0, 180.0, 120.0, 5.0)
-    
-    st.header("📏 Envelope Constraints")
-    max_od = st.number_input("Max OD (mm)", 100.0, 500.0, 200.0, 10.0)
+    st.header("📏 Face Width")
+    b_factor = st.slider("b/m Ratio", 6.0, 20.0, 12.0, 0.5)
+    b = b_factor * module
 
 # ================================================================
-# CALCULATION ENGINE
+# CALCULATIONS
 # ================================================================
-# Geometry
-geom_sun = gear_geometry(zs, module, DEFAULT_ALPHA, False)
-geom_planet = gear_geometry(zp, module, DEFAULT_ALPHA, False)
-geom_ring = gear_geometry(zr, module, DEFAULT_ALPHA, True)
+# Basic geometry
+sun_geom = gear_geometry(int(zs), module, alpha, False, beta)
+planet_geom = gear_geometry(int(zp), module, alpha, False, beta)
+ring_geom = gear_geometry(int(zr), module, alpha, True, beta)
 
 # Set face widths
-geom_sun["face_width"] = b
-geom_planet["face_width"] = b
-geom_ring["face_width"] = b + 2.0
+sun_geom['face_width'] = b
+planet_geom['face_width'] = b
+ring_geom['face_width'] = b + 2.0
 
-# Ratio check
-ratio_actual = ratio_ring_fixed(zs, zr)
+# Ratio
+ratio_actual = ratio_ring_fixed(int(zs), int(zr))
 ratio_ok = abs(ratio_actual - ratio_target) < 1e-9
+output_speed = nin / ratio_actual
 
 # Assembly checks
-assembly = assembly_ok(zs, zr, DEFAULT_PLANETS)
-clearance = planet_spacing_ok(zs, zp, DEFAULT_PLANETS)
+assembly = assembly_ok(int(zs), int(zr), nplanets)
+clearance = planet_spacing_ok(int(zs), int(zp), nplanets)
 
 # Loads
-Tin_design = design_out / (ratio_actual * DEFAULT_ETA)
-loads = calculate_loads(Tin_design, zs, zr, DEFAULT_PLANETS, module, DEFAULT_ALPHA)
+Tin_design = design_out / (ratio_actual * eta)
+loads = mesh_loads(Tin_design, int(zs), int(zr), nplanets, module, alpha, beta)
 
 # Stresses
-stress = calculate_stress(loads, module, b, zs, zp, zr, mat, 
-                          alpha_deg=DEFAULT_ALPHA, theta_deg=theta_deg)
+stress = gear_stress(loads, module, b, int(zs), int(zp), int(zr), mat, alpha, theta_deg=theta)
 
-# Shaft sizing
-din, Te_in = shaft_diameter(Tin_design, 0.0, mat["tau"], Kb, Kt, Kw)
-dout, Te_out = shaft_diameter(design_out, 0.0, mat["tau"], Kb, Kt, Kw)
-
-# Pin design
-pin = pin_design(stress["F_pin"], pin_span, mat["sigma_allow_bend"], 
-                 mat["tau"], bearing_p, safety=service_factor)
+# Shafts & Pins
+din, Te_in = shaft_diameter(Tin_design, 0.0, mat['tau'], Kb, Kt, Kw)
+dout, Te_out = shaft_diameter(design_out, 0.0, mat['tau'], Kb, Kt, Kw)
+pin = pin_design(stress['F_pin'], pin_span, mat['sigma_allow_bend'], mat['tau'], bearing_p)
 
 # Component dimensions
-comps = calculate_component_dimensions(
-    zs, zp, zr, module, b,
-    geom_sun["pitch_d"], geom_planet["pitch_d"], geom_ring["pitch_d"],
-    din, dout, pin["d_pin"], max_od, pin_span, DEFAULT_PLANETS
+comp = component_dimensions(
+    int(zs), int(zp), int(zr), module, b,
+    sun_geom['pitch_d'], planet_geom['pitch_d'], ring_geom['pitch_d'],
+    din, dout, pin['d_pin'], max_od, pin_span, design_out, nplanets
 )
 
 # Deflections
-deflections = calculate_deflections(loads, b, module, zs, zr, mat,
-                                    din, dout, pin_span, pin["d_pin"],
-                                    comps["carrier"]["plate_thickness"])
+deflections = calculate_deflections(
+    loads, b, module, int(zs), int(zr), mat,
+    din, dout, pin_span, pin['d_pin'], comp['carrier']['plate_thickness']
+)
 
 # Bearing life
-main_bearing_radial = math.hypot(loads["Fr_SP"], loads["Ft_SP"]) * service_factor
-n_planet_rel = abs(nin - nin / ratio_actual) * zs / zp
+main_bearing_radial = math.hypot(loads['Fr_SP'], loads['Ft_SP']) * service
+n_planet_rel = abs(nin - output_speed) * int(zs) / int(zp)
+main_bearing_life = bearing_L10_life(12000.0, main_bearing_radial, nin, "Ball")
+planet_bearing_life = bearing_L10_life(6000.0, stress['F_pin'] * service, n_planet_rel, "Roller")
 
-# Thermal calculation
-power_loss = (1 - DEFAULT_ETA) * motor_power_manual * 1000.0  # W
-housing_area = PI * comps["housing"]["outer_d"] / 1000.0 * comps["housing"]["length"] / 1000.0
+# Thermal
+power_loss = (1 - eta) * motor_power_kw * 1000.0
+housing_area = PI * comp['housing']['outer_d'] / 1000.0 * comp['housing']['length'] / 1000.0
 thermal = calculate_thermal(power_loss, housing_area)
 
-# Bearing life (main and planet)
-main_bearing_life = bearing_L10_life(12000.0, main_bearing_radial, nin, "Ball")
-planet_bearing_life = bearing_L10_life(6000.0, stress["F_pin"] * service_factor, 
-                                       n_planet_rel, "Roller")
+# Safety factors
+sfF = mat['sigmaF'] / max(stress['sigmaF_planet'], 1e-9)
+sfH_sp = mat['sigmaH'] / max(stress['sigmaH_SP'], 1e-9)
+sfH_rp = mat['sigmaH'] / max(stress['sigmaH_RP'], 1e-9)
 
-# Overall status
-sfF = mat["sigmaF"] / max(stress["sigmaF_planet"], 1e-9)
-sfH_sp = mat["sigmaH"] / max(stress["sigmaH_SP"], 1e-9)
-sfH_rp = mat["sigmaH"] / max(stress["sigmaH_RP"], 1e-9)
-
-od_ok = comps["housing"]["outer_d"] <= max_od
+# Overall checks
+od_ok = comp['housing']['outer_d'] <= max_od
 checks = [
-    ("Ratio (1:9)", ratio_ok),
-    ("Assembly Condition", assembly),
-    ("Planet Clearance", clearance),
+    ("Ratio", ratio_ok),
+    ("Assembly", assembly),
+    ("Clearance", clearance),
     ("OD Envelope", od_ok),
     ("Gear Bending SF", sfF >= 1.0),
     ("Sun Contact SF", sfH_sp >= 1.0),
     ("Ring Contact SF", sfH_rp >= 1.0),
-    ("Planet Pin Pressure", pin["pressure_ok"]),
-    ("Deflection Limit", deflections["sun_deflection"] < 0.1),
-    ("Thermal", thermal["thermal_ok"]),
+    ("Planet Pin Pressure", pin['pressure_ok']),
+    ("Deflection < 0.1mm", deflections['sun_deflection'] < 0.1),
+    ("Thermal < 90°C", thermal['thermal_ok']),
 ]
-
-overall_ok = all(ok for _, ok in checks)
+overall = all(ok for _, ok in checks)
 
 # ================================================================
-# MAIN DASHBOARD
+# DASHBOARD
 # ================================================================
-# Header metrics
 col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-with col_m1:
-    st.metric("Achieved Ratio", f"1:{ratio_actual:.3f}")
-with col_m2:
-    st.metric("Output Speed", f"{nin / ratio_actual:.0f} rpm")
-with col_m3:
-    st.metric("Motor Power", f"{motor_power_manual:.3f} kW")
-with col_m4:
-    st.metric("Design Torque", f"{design_out:.1f} N·m")
-with col_m5:
-    if overall_ok:
-        st.markdown('<div class="pass-badge">PASS ✓</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="fail-badge">CHECK ⚠️</div>', unsafe_allow_html=True)
+col_m1.metric("Ratio", f"1:{ratio_actual:.3f}")
+col_m2.metric("Output Speed", f"{output_speed:.1f} rpm")
+col_m3.metric("Motor Power", f"{motor_power_kw:.3f} kW")
+col_m4.metric("Design Torque", f"{design_out:.1f} N·m")
+col_m5.metric("Status", "PASS ✅" if overall else "CHECK ⚠️")
 
-st.divider()
+st.info(f"**Teeth:** Zs={zs}, Zp={zp}, Zr={zr}  |  **Module:** {module:.2f} mm  |  **Face Width:** {b:.1f} mm")
 
 # ================================================================
 # TABS
 # ================================================================
 tabs = st.tabs([
-    "📊 Summary",
-    "⚙️ Tooth Sizing",
+    "📊 Results",
+    "⚙️ Tooth Synthesis",
     "📐 Geometry",
     "🔄 Kinematics",
-    "🧲 Forces & Stress",
+    "🧲 Forces",
+    "🧮 Stress",
     "🔩 Shafts & Pins",
     "🧱 Component Dimensions",
     "📏 Deflections",
     "🛞 Bearings",
     "🔥 Thermal",
-    "✅ Design Checks",
-    "📊 Charts & Plots"
+    "✅ Checks",
+    "🧊 3D Visualization"
 ])
 
-# ---------------- TAB 1: SUMMARY ----------------
+# TAB 1: Results
 with tabs[0]:
-    st.subheader("📊 Complete Design Summary")
-    
-    summary_data = {
-        "Parameter": [
-            "Configuration", "Input Member", "Output Member", "Fixed Member",
-            "Target Ratio", "Actual Ratio", "Ratio Error",
-            "Input Torque (design)", "Input Speed", "Output Speed",
-            "Module", "Face Width", "Number of Planets",
-            "Material", "Envelope OD", "Status"
-        ],
-        "Value": [
-            "Single-Stage Planetary", "Sun", "Carrier", "Ring",
-            f"1:{ratio_target:.1f}", f"1:{ratio_actual:.3f}", 
-            f"{abs(ratio_actual - ratio_target) * 100:.2f}%",
-            f"{Tin_design:.2f} N·m", f"{nin:.0f} rpm", f"{nin / ratio_actual:.1f} rpm",
-            f"{module:.2f} mm", f"{b:.1f} mm", f"{DEFAULT_PLANETS}",
-            mat_name, f"{comps['housing']['outer_d']:.1f} mm",
-            "✅ PASS" if overall_ok else "⚠️ REVIEW"
-        ]
-    }
-    
-    st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
-    
-    # Key component sizes
-    st.subheader("Key Component Sizes")
-    key_sizes = {
-        "Component": ["Sun Gear", "Planet Gear", "Ring Gear", "Carrier", 
-                      "Input Shaft", "Output Shaft", "Planet Pin", "Housing"],
-        "Key Dimension": [
-            f"⌀{comps['sun_gear']['hub_od']:.1f} × {comps['sun_gear']['total_height']:.1f}",
-            f"⌀{comps['planet_gear']['hub_od']:.1f} × {comps['planet_gear']['total_height']:.1f}",
-            f"⌀{comps['ring_gear']['outer_d']:.1f} × {comps['ring_gear']['total_height']:.1f}",
-            f"⌀{comps['carrier']['plate_od']:.1f} × {comps['carrier']['total_height']:.1f}",
-            f"⌀{comps['input_shaft']['diameter']:.1f} × {comps['input_shaft']['length']:.1f}",
-            f"⌀{comps['output_shaft']['diameter']:.1f} × {comps['output_shaft']['length']:.1f}",
-            f"⌀{comps['planet_pin']['diameter']:.1f} × {comps['planet_pin']['total_length']:.1f}",
-            f"⌀{comps['housing']['outer_d']:.1f} × {comps['housing']['length']:.1f}"
-        ]
-    }
-    st.dataframe(pd.DataFrame(key_sizes), hide_index=True, use_container_width=True)
+    st.subheader("Overall Design Results")
+    summary = pd.DataFrame([
+        ["Input Torque", tin, "N·m"],
+        ["Input Speed", nin, "rpm"],
+        ["Motor Power", motor_power_kw, "kW"],
+        ["Efficiency", eta, "—"],
+        ["Actual Ratio", ratio_actual, "—"],
+        ["Output Speed", output_speed, "rpm"],
+        ["Design Output Torque", design_out, "N·m"],
+        ["Input Design Torque", Tin_design, "N·m"],
+        ["Module", module, "mm"],
+        ["Face Width", b, "mm"],
+        ["Ring Envelope OD", comp['housing']['outer_d'], "mm"],
+        ["Input Shaft Dia", din, "mm"],
+        ["Output Shaft Dia", dout, "mm"],
+        ["Planet Pin Dia", pin['d_pin'], "mm"],
+        ["Gear Bending SF", sfF, "—"],
+        ["Sun Contact SF", sfH_sp, "—"],
+        ["Ring Contact SF", sfH_rp, "—"],
+    ], columns=["Parameter", "Value", "Unit"])
+    st.dataframe(summary, hide_index=True, use_container_width=True)
 
-# ---------------- TAB 2: TOOTH SIZING ----------------
+# TAB 2: Tooth Synthesis
 with tabs[1]:
-    st.subheader("⚙️ Gear Tooth Selection")
+    st.subheader("Tooth Synthesis")
+    tooth_df = pd.DataFrame([
+        ["Sun", zs, "Input"],
+        ["Planet", zp, "Meshing"],
+        ["Ring", zr, "Fixed"],
+        ["S + 2P = R", f"{zs}+2({zp}) = {zs+2*zp}", "Geometry"],
+        ["Ratio", f"{ratio_actual:.3f}", "(S+R)/S"],
+        ["Assembly", "PASS" if assembly else "FAIL", "(S+R) mod N"],
+        ["Clearance", "PASS" if clearance else "CHECK", "Pitch-circle check"],
+        ["Module", f"{module:.2f}", "mm"],
+    ], columns=["Item", "Value", "Meaning"])
+    st.dataframe(tooth_df, hide_index=True, use_container_width=True)
     
-    st.markdown(f"""
-    **Selected Configuration:**
-    - Sun: **{zs} teeth**
-    - Planet: **{zp} teeth** (× {DEFAULT_PLANETS})
-    - Ring: **{zr} teeth**
-    - Module: **{module:.2f} mm**
-    
-    **Verification Equations:**
-    - Coaxiality: R = S + 2P → {zs} + 2×{zp} = {zs + 2*zp} ✓
-    - Ratio (Ring Fixed): i = (S + R)/S = ({zs} + {zr})/{zs} = {ratio_actual:.3f}
-    - Assembly: (S + R) mod N = ({zs} + {zr}) mod {DEFAULT_PLANETS} = {(zs + zr) % DEFAULT_PLANETS} → {'✓' if assembly else '✗'}
-    - Clearance: (S + P)sin(180°/N) > P + 2 → {(zs + zp) * math.sin(PI / DEFAULT_PLANETS):.1f} > {zp + 2} → {'✓' if clearance else '✗'}
-    """)
-    
-    # Show other possible tooth combinations
-    st.subheader("Other Valid 1:9 Combinations")
-    candidates = []
-    for zs_try in range(17, 60):
-        for zp_try in range(17, 100):
-            zr_try = exact_ring_teeth(zs_try, zp_try)
-            ratio_try = ratio_ring_fixed(zs_try, zr_try)
-            if abs(ratio_try - ratio_target) < 1e-9:
-                if assembly_ok(zs_try, zr_try, DEFAULT_PLANETS) and planet_spacing_ok(zs_try, zp_try, DEFAULT_PLANETS):
-                    candidates.append({
-                        "Sun": zs_try, "Planet": zp_try, "Ring": zr_try,
-                        "Ratio": f"1:{ratio_try:.3f}",
-                        "Module 1.0 OD": f"{(zr_try + 2.5) * 1.0:.1f} mm",
-                        "Module 1.5 OD": f"{(zr_try + 2.5) * 1.5:.1f} mm",
-                        "Module 2.0 OD": f"{(zr_try + 2.5) * 2.0:.1f} mm"
-                    })
-    
-    if candidates:
-        st.dataframe(pd.DataFrame(candidates), hide_index=True, use_container_width=True)
+    cand = suggest_tooth_sets(ratio_target, nplanets, max_od)
+    if not cand.empty:
+        st.markdown("**Other 1:9 candidates:**")
+        st.dataframe(cand.head(20), hide_index=True, use_container_width=True)
 
-# ---------------- TAB 3: GEOMETRY ----------------
+# TAB 3: Geometry
 with tabs[2]:
-    st.subheader("📐 Complete Gear Geometry")
-    
-    geo_data = []
-    for gear_name, geom in [("Sun", geom_sun), ("Planet", geom_planet), ("Ring", geom_ring)]:
-        geo_data.append({
-            "Gear": gear_name,
-            "Teeth (z)": geom["z"],
-            "Module (mm)": geom["module"],
-            "Pitch Dia (mm)": f"{geom['pitch_d']:.3f}",
-            "Base Dia (mm)": f"{geom['base_d']:.3f}",
-            "Tip Dia (mm)": f"{geom['tip_d']:.3f}",
-            "Root Dia (mm)": f"{geom['root_d']:.3f}",
-            "Addendum (mm)": f"{geom['addendum']:.3f}",
-            "Dedendum (mm)": f"{geom['dedendum']:.3f}",
-            "Circular Pitch (mm)": f"{geom['circular_pitch']:.3f}",
-            "Face Width (mm)": f"{geom['face_width']:.2f}"
-        })
-    
-    st.dataframe(pd.DataFrame(geo_data), hide_index=True, use_container_width=True)
-    
-    # Center distances
-    st.subheader("Center Distances")
-    a_sun_planet = (geom_sun["pitch_d"] + geom_planet["pitch_d"]) / 2.0
-    a_ring_planet = (geom_ring["pitch_d"] - geom_planet["pitch_d"]) / 2.0
-    
-    st.markdown(f"""
-    - **Sun–Planet Center Distance:** {a_sun_planet:.3f} mm
-    - **Ring–Planet Center Distance:** {a_ring_planet:.3f} mm
-    - **Verification:** {a_sun_planet:.3f} = {a_ring_planet:.3f} → {'✓' if abs(a_sun_planet - a_ring_planet) < 0.01 else '✗'}
-    """)
+    st.subheader("Gear Geometry")
+    geo_df = pd.DataFrame([
+        ["Sun", zs, sun_geom['pitch_d'], sun_geom['base_d'], sun_geom['tip_d'], sun_geom['root_d'], b],
+        ["Planet", zp, planet_geom['pitch_d'], planet_geom['base_d'], planet_geom['tip_d'], planet_geom['root_d'], b],
+        ["Ring", zr, ring_geom['pitch_d'], ring_geom['base_d'], ring_geom['tip_d'], ring_geom['root_d'], b+2.0],
+    ], columns=["Gear", "Teeth", "Pitch (mm)", "Base (mm)", "Tip (mm)", "Root (mm)", "Face (mm)"])
+    st.dataframe(geo_df, hide_index=True, use_container_width=True)
+    st.write(f"Centre Distance (S-P): {(sun_geom['pitch_d']+planet_geom['pitch_d'])/2:.3f} mm")
+    st.write(f"Centre Distance (R-P): {(ring_geom['pitch_d']-planet_geom['pitch_d'])/2:.3f} mm")
 
-# ---------------- TAB 4: KINEMATICS ----------------
+# TAB 4: Kinematics
 with tabs[3]:
-    st.subheader("🔄 Kinematics")
-    
-    output_speed = nin / ratio_actual
-    n_planet_rel = abs(nin - output_speed) * zs / zp
-    
-    kin_data = {
-        "Member": ["Sun (Input)", "Ring (Fixed)", "Carrier (Output)", 
-                   "Planet (Relative to Carrier)", "Planet (Absolute)"],
-        "Speed (rpm)": [
-            f"{nin:.1f}",
-            "0.0",
-            f"{output_speed:.2f}",
-            f"{n_planet_rel:.2f}",
-            f"{output_speed + n_planet_rel:.2f}"
-        ],
-        "Direction": ["Same as input", "Stationary", "Reduced speed", 
-                      "Opposite to carrier", "Compound motion"]
-    }
-    
-    st.dataframe(pd.DataFrame(kin_data), hide_index=True, use_container_width=True)
-    
-    st.markdown(f"""
-    **Speed Relationships:**
-    - **Willis Equation:** (n_s - n_c) / (n_r - n_c) = -z_r / z_s = -{zr}/{zs} = {-zr/zs:.3f}
-    - **Planet Spin:** n_p = -n_c × (z_s/z_p) + (n_s - n_c) × (z_s/z_p) = **{n_planet_rel:.2f} rpm**
-    - **Output Speed:** n_out = n_in / i = {nin} / {ratio_actual:.3f} = **{output_speed:.2f} rpm**
-    """)
+    kin = kinematics_ring_fixed(nin, ratio_actual, int(zs), int(zp))
+    st.dataframe(pd.DataFrame([
+        ["Sun", kin['n_sun'], "rpm"],
+        ["Ring", 0.0, "rpm"],
+        ["Carrier", kin['n_carrier'], "rpm"],
+        ["Planet (rel)", kin['n_planet_rel_carrier'], "rpm"],
+    ], columns=["Member", "Speed", "Unit"]), hide_index=True, use_container_width=True)
 
-# ---------------- TAB 5: FORCES & STRESS ----------------
+# TAB 5: Forces
 with tabs[4]:
-    st.subheader("🧲 Mesh Forces")
-    
-    force_data = {
-        "Force": [
-            "Tangential Ft (Sun-Planet)", 
-            "Tangential Ft (Ring-Planet)",
-            "Radial Fr (Sun-Planet)",
-            "Radial Fr (Ring-Planet)",
-            "Normal Fn (Sun-Planet)",
-            "Normal Fn (Ring-Planet)",
-            "Resultant Planet Pin Load"
-        ],
-        "Value (N)": [
-            f"{loads['Ft_SP']:.2f}",
-            f"{loads['Ft_RP']:.2f}",
-            f"{loads['Fr_SP']:.2f}",
-            f"{loads['Fr_RP']:.2f}",
-            f"{loads['Fn_SP']:.2f}",
-            f"{loads['Fn_RP']:.2f}",
-            f"{stress['F_pin']:.2f}"
-        ]
-    }
-    
-    st.dataframe(pd.DataFrame(force_data), hide_index=True, use_container_width=True)
-    
-    st.subheader("🧮 Gear Stresses")
-    
-    stress_data = {
-        "Check": [
-            "Bending σF — Sun/Planet",
-            "Bending σF — Ring/Planet",
-            "Combined Planet Root σF",
-            "Contact σH — Sun/Planet",
-            "Contact σH — Ring/Planet"
-        ],
-        "Actual (MPa)": [
-            f"{stress['sigmaF_SP']:.1f}",
-            f"{stress['sigmaF_RP']:.1f}",
-            f"{stress['sigmaF_planet']:.1f}",
-            f"{stress['sigmaH_SP']:.1f}",
-            f"{stress['sigmaH_RP']:.1f}"
-        ],
-        "Allowable (MPa)": [
-            f"{mat['sigmaF']:.0f}",
-            f"{mat['sigmaF']:.0f}",
-            f"{mat['sigmaF']:.0f}",
-            f"{mat['sigmaH']:.0f}",
-            f"{mat['sigmaH']:.0f}"
-        ],
-        "Safety Factor": [
-            f"{stress['SF_bending_sun']:.2f}",
-            f"{stress['SF_bending_planet']:.2f}",
-            f"{stress['SF_bending_planet']:.2f}",
-            f"{stress['SF_contact_sun']:.2f}",
-            f"{stress['SF_contact_ring']:.2f}"
-        ],
-        "Status": [
-            "✅ PASS" if stress['SF_bending_sun'] >= 1 else "❌ FAIL",
-            "✅ PASS" if stress['SF_bending_planet'] >= 1 else "❌ FAIL",
-            "✅ PASS" if stress['SF_bending_planet'] >= 1 else "❌ FAIL",
-            "✅ PASS" if stress['SF_contact_sun'] >= 1 else "❌ FAIL",
-            "✅ PASS" if stress['SF_contact_ring'] >= 1 else "❌ FAIL"
-        ]
-    }
-    
-    st.dataframe(pd.DataFrame(stress_data), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame([
+        ["Ft SP", loads['Ft_SP'], "N"],
+        ["Ft RP", loads['Ft_RP'], "N"],
+        ["Fr SP", loads['Fr_SP'], "N"],
+        ["Fr RP", loads['Fr_RP'], "N"],
+        ["Fn SP", loads['Fn_SP'], "N"],
+        ["Fn RP", loads['Fn_RP'], "N"],
+        ["Pin Load", stress['F_pin'], "N"],
+    ], columns=["Force", "Value", "Unit"]), hide_index=True, use_container_width=True)
 
-# ---------------- TAB 6: SHAFTS & PINS ----------------
+# TAB 6: Stress
 with tabs[5]:
-    st.subheader("🔩 Shaft & Pin Sizing (ASME Code)")
-    
-    shaft_data = {
-        "Component": ["Input Shaft", "Output Shaft", "Planet Pin"],
-        "Design Torque/Load": [
-            f"{Tin_design:.2f} N·m",
-            f"{design_out:.2f} N·m",
-            f"{pin['F_design']:.2f} N"
-        ],
-        "Equivalent Torque (N·m)": [
-            f"{Te_in:.2f}",
-            f"{Te_out:.2f}",
-            "—"
-        ],
-        "From Bending": [
-            "—", "—",
-            f"{pin['d_bend']:.2f} mm"
-        ],
-        "From Shear": [
-            "—", "—",
-            f"{pin['d_shear']:.2f} mm"
-        ],
-        "Required Diameter": [
-            f"{din:.2f} mm",
-            f"{dout:.2f} mm",
-            f"{pin['d_pin']:.2f} mm"
-        ],
-        "Bearing Pressure": [
-            "—", "—",
-            f"{pin['p_bearing']:.2f} MPa"
-        ]
-    }
-    
-    st.dataframe(pd.DataFrame(shaft_data), hide_index=True, use_container_width=True)
-    
-    st.subheader("Keyway Sizing")
-    key_data = {
-        "Component": ["Input Shaft", "Output Shaft"],
-        "Key Width (mm)": [
-            f"{comps['input_shaft']['key_width']:.1f}",
-            f"{comps['output_shaft']['key_width']:.1f}"
-        ],
-        "Key Depth (mm)": [
-            f"{comps['input_shaft']['key_depth']:.1f}",
-            f"{comps['output_shaft']['key_depth']:.1f}"
-        ],
-        "Shoulder Diameter (mm)": [
-            f"{comps['input_shaft']['shoulder_diameter']:.1f}",
-            f"{comps['output_shaft']['shoulder_diameter']:.1f}"
-        ]
-    }
-    st.dataframe(pd.DataFrame(key_data), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame([
+        ["Bending SP", stress['sigmaF_SP'], mat['sigmaF'], mat['sigmaF']/max(stress['sigmaF_SP'],1e-9)],
+        ["Bending RP", stress['sigmaF_RP'], mat['sigmaF'], mat['sigmaF']/max(stress['sigmaF_RP'],1e-9)],
+        ["Combined Planet", stress['sigmaF_planet'], mat['sigmaF'], sfF],
+        ["Contact SP", stress['sigmaH_SP'], mat['sigmaH'], sfH_sp],
+        ["Contact RP", stress['sigmaH_RP'], mat['sigmaH'], sfH_rp],
+    ], columns=["Check", "Actual MPa", "Allowable MPa", "SF"]), hide_index=True, use_container_width=True)
+    st.warning("Screening equations — verify with full ISO/AGMA.")
 
-# ---------------- TAB 7: COMPONENT DIMENSIONS ----------------
+# TAB 7: Shafts & Pins
 with tabs[6]:
-    st.subheader("🧱 Complete Component Dimensions")
-    
-    # Convert dimensions to DataFrame using the helper function
-    dim_df = components_to_dataframe(comps)
-    st.dataframe(dim_df, hide_index=True, use_container_width=True)
-    
-    # Detailed breakdown by component
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Sun Gear")
-        st.json(comps["sun_gear"], expanded=False)
-        
-        st.subheader("Planet Gear")
-        st.json(comps["planet_gear"], expanded=False)
-        
-        st.subheader("Ring Gear")
-        st.json(comps["ring_gear"], expanded=False)
-    
-    with col2:
-        st.subheader("Carrier")
-        st.json(comps["carrier"], expanded=False)
-        
-        st.subheader("Planet Pin")
-        st.json(comps["planet_pin"], expanded=False)
-        
-        st.subheader("Housing")
-        st.json(comps["housing"], expanded=False)
+    st.dataframe(pd.DataFrame([
+        ["Input Shaft", Tin_design, 0.0, Te_in, din],
+        ["Output Shaft", design_out, 0.0, Te_out, dout],
+        ["Planet Pin", pin['F_design'], pin['Mmax'], "—", pin['d_pin']],
+    ], columns=["Component", "Torque/Load", "Moment", "Te", "Dia (mm)"]), 
+    hide_index=True, use_container_width=True)
+    st.caption("Pin bending/shear/pressure details below.")
+    st.dataframe(pd.DataFrame([
+        ["Pin Design Load", pin['F_design'], "N"],
+        ["Max Bending Moment", pin['Mmax'], "N·mm"],
+        ["Support Shear", pin['V'], "N"],
+        ["d from Bending", pin['d_bend'], "mm"],
+        ["d from Shear", pin['d_shear'], "mm"],
+        ["Bearing Pressure", pin['p_bearing'], "MPa"],
+        ["Pressure Check", "PASS" if pin['pressure_ok'] else "FAIL", "—"],
+    ], columns=["Parameter", "Value", "Unit"]), hide_index=True, use_container_width=True)
 
-# ---------------- TAB 8: DEFLECTIONS ----------------
+# TAB 8: Component Dimensions
 with tabs[7]:
-    st.subheader("📏 Deflection Analysis")
-    
-    defl_data = {
-        "Component": [
-            "Sun Gear Radial Deflection",
-            "Ring Gear Radial Deflection",
-            "Carrier Deflection",
-            "Input Shaft Torsional Angle",
-            "Output Shaft Torsional Angle",
-            "Tooth Deflection at Contact"
-        ],
-        "Value": [
-            f"{deflections['sun_deflection']:.4f} mm",
-            f"{deflections['ring_deflection']:.4f} mm",
-            f"{deflections['carrier_deflection']:.4f} mm",
-            f"{deflections['shaft_torsional_angle_input']:.2f}°",
-            f"{deflections['shaft_torsional_angle_output']:.2f}°",
-            f"{deflections['tooth_deflection']:.4f} mm"
-        ],
-        "Limit": [
-            "< 0.10 mm (gear deflection limit)",
-            "< 0.10 mm",
-            "< 0.15 mm",
-            "< 1.0° per metre",
-            "< 1.0° per metre",
-            "< 0.05 mm"
-        ],
-        "Status": [
-            "✅" if deflections['sun_deflection'] < 0.10 else "⚠️",
-            "✅" if deflections['ring_deflection'] < 0.10 else "⚠️",
-            "✅" if deflections['carrier_deflection'] < 0.15 else "⚠️",
-            "✅" if deflections['shaft_torsional_angle_input'] < 1.0 else "⚠️",
-            "✅" if deflections['shaft_torsional_angle_output'] < 1.0 else "⚠️",
-            "✅" if deflections['tooth_deflection'] < 0.05 else "⚠️"
-        ]
-    }
-    
-    st.dataframe(pd.DataFrame(defl_data), hide_index=True, use_container_width=True)
+    st.subheader("All Component Dimensions")
+    rows = []
+    for cname, dims in comp.items():
+        if isinstance(dims, dict):
+            for k, v in dims.items():
+                rows.append([cname.replace('_', ' ').title(), k.replace('_', ' ').title(), v, "mm"])
+    st.dataframe(pd.DataFrame(rows, columns=["Component", "Dimension", "Value", "Unit"]), 
+                 hide_index=True, use_container_width=True)
 
-# ---------------- TAB 9: BEARINGS ----------------
+# TAB 9: Deflections
 with tabs[8]:
-    st.subheader("🛞 Bearing Selection & Life")
-    
-    # Main bearing
-    st.markdown("### Main Shaft Bearing (Input/Output)")
-    main_bearing_data = {
-        "Parameter": [
-            "Radial Load on Bearing",
-            "Equivalent Load (× SF)",
-            "Selected Bearing",
-            "Dynamic Capacity C",
-            "L10 Life (million rev)",
-            "L10 Life (hours)",
-            "Operating Speed"
-        ],
-        "Value": [
-            f"{main_bearing_radial / service_factor:.2f} N",
-            f"{main_bearing_radial:.2f} N",
-            "SKF 6204 (⌀20×47×14)",
-            "12,800 N",
-            f"{main_bearing_life['L10_Mrev']:.0f}",
-            f"{main_bearing_life['L10_h']:.0f}",
-            f"{nin} rpm"
-        ]
-    }
-    st.dataframe(pd.DataFrame(main_bearing_data), hide_index=True, use_container_width=True)
-    
-    # Planet bearing
-    st.markdown("### Planet Bearing")
-    planet_bearing_data = {
-        "Parameter": [
-            "Radial Load on Bearing",
-            "Equivalent Load (× SF)",
-            "Selected Bearing",
-            "Dynamic Capacity C",
-            "L10 Life (million rev)",
-            "L10 Life (hours)",
-            "Operating Speed (relative)"
-        ],
-        "Value": [
-            f"{stress['F_pin']:.2f} N",
-            f"{stress['F_pin'] * service_factor:.2f} N",
-            "INA NKI12/16 (⌀12×24×16)",
-            "6,500 N",
-            f"{planet_bearing_life['L10_Mrev']:.0f}",
-            f"{planet_bearing_life['L10_h']:.0f}",
-            f"{n_planet_rel:.0f} rpm"
-        ]
-    }
-    st.dataframe(pd.DataFrame(planet_bearing_data), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame([
+        ["Sun Deflection", deflections['sun_deflection'], "mm", "< 0.10", "✅" if deflections['sun_deflection'] < 0.10 else "⚠️"],
+        ["Ring Deflection", deflections['ring_deflection'], "mm", "< 0.10", "✅" if deflections['ring_deflection'] < 0.10 else "⚠️"],
+        ["Carrier Deflection", deflections['carrier_deflection'], "mm", "< 0.15", "✅" if deflections['carrier_deflection'] < 0.15 else "⚠️"],
+        ["Torsion Input", deflections['shaft_torsional_angle_input'], "°", "< 1.0", "✅" if deflections['shaft_torsional_angle_input'] < 1.0 else "⚠️"],
+        ["Torsion Output", deflections['shaft_torsional_angle_output'], "°", "< 1.0", "✅" if deflections['shaft_torsional_angle_output'] < 1.0 else "⚠️"],
+        ["Tooth Deflection", deflections['tooth_deflection'], "mm", "< 0.05", "✅" if deflections['tooth_deflection'] < 0.05 else "⚠️"],
+    ], columns=["Component", "Value", "Unit", "Limit", "Status"]), 
+    hide_index=True, use_container_width=True)
 
-# ---------------- TAB 10: THERMAL ----------------
+# TAB 10: Bearings
 with tabs[9]:
-    st.subheader("🔥 Thermal Analysis")
-    
-    thermal_data = {
-        "Parameter": [
-            "Power Loss (Friction)",
-            "Housing Surface Area",
-            "Heat Transfer Coefficient",
-            "Temperature Rise",
-            "Steady-State Temperature",
-            "Maximum Allowable (mineral oil)",
-            "Status"
-        ],
-        "Value": [
-            f"{thermal['power_loss_W']:.2f} W",
-            f"{thermal['housing_area_m2']:.4f} m²",
-            "15.0 W/m²·K (natural convection)",
-            f"{thermal['delta_T']:.1f} °C",
-            f"{thermal['steady_state_T']:.1f} °C",
-            "90.0 °C",
-            "✅ PASS" if thermal['thermal_ok'] else "⚠️ NEEDS COOLING"
-        ]
-    }
-    st.dataframe(pd.DataFrame(thermal_data), hide_index=True, use_container_width=True)
-    
-    if not thermal['thermal_ok']:
-        st.warning("⚠️ Thermal limit exceeded. Consider:")
-        st.markdown("""
-        - Increase housing size (surface area)
-        - Add cooling fins
-        - Use synthetic oil with higher temperature rating
-        - Reduce continuous power
-        """)
+    st.dataframe(pd.DataFrame([
+        ["Main Bearing", main_bearing_radial, 12000.0, main_bearing_life['L10_Mrev'], main_bearing_life['L10_h'], "Ball"],
+        ["Planet Bearing", stress['F_pin']*service, 6000.0, planet_bearing_life['L10_Mrev'], planet_bearing_life['L10_h'], "Roller"],
+    ], columns=["Bearing", "Load N", "C N", "L10 Mrev", "L10 hours", "Type"]), 
+    hide_index=True, use_container_width=True)
 
-# ---------------- TAB 11: DESIGN CHECKS ----------------
+# TAB 11: Thermal
 with tabs[10]:
-    st.subheader("✅ Complete Design Check Dashboard")
-    
+    st.dataframe(pd.DataFrame([
+        ["Power Loss", thermal['power_loss_W'], "W"],
+        ["Housing Area", thermal['housing_area_m2'], "m²"],
+        ["Temp Rise", thermal['delta_T'], "°C"],
+        ["Steady Temp", thermal['steady_state_T'], "°C"],
+        ["Status", "PASS" if thermal['thermal_ok'] else "NEEDS COOLING", "—"],
+    ], columns=["Parameter", "Value", "Unit"]), 
+    hide_index=True, use_container_width=True)
+
+# TAB 12: Checks
+with tabs[11]:
     check_df = pd.DataFrame(
-        [(name, "✅ PASS" if ok else "❌ FAIL") for name, ok in checks],
+        [(name, "PASS ✅" if ok else "FAIL ❌") for name, ok in checks],
         columns=["Design Check", "Status"]
     )
-    
     st.dataframe(check_df, hide_index=True, use_container_width=True)
-    
-    # Overall status
-    st.divider()
-    if overall_ok:
-        st.markdown("## 🎉 **DESIGN PASSES ALL CHECKS**")
+    if overall:
         st.balloons()
-    else:
-        st.markdown("## ⚠️ **DESIGN REQUIRES REVIEW**")
-        failing = [name for name, ok in checks if not ok]
-        st.warning(f"Failed checks: {', '.join(failing)}")
 
-# ---------------- TAB 12: CHARTS & PLOTS ----------------
-with tabs[11]:
-    st.subheader("📊 Design Visualizations")
+# TAB 13: 3D Visualization
+with tabs[12]:
+    st.subheader("🧊 3D Visualization")
     
-    # Gear schematic
-    st.markdown("### Gearbox Schematic")
-    fig = create_gearbox_schematic(geom_sun, geom_planet, geom_ring, 
-                                   DEFAULT_PLANETS, pin["d_pin"])
-    st.pyplot(fig)
-    
-    # Stress comparison chart
-    st.markdown("### Stress Safety Factors")
-    sf_data = pd.DataFrame({
-        "Check": ["Bending (Sun)", "Bending (Planet)", 
-                   "Contact (Sun)", "Contact (Ring)"],
-        "Safety Factor": [
-            stress["SF_bending_sun"],
-            stress["SF_bending_planet"],
-            stress["SF_contact_sun"],
-            stress["SF_contact_ring"]
-        ]
-    })
-    
-    fig2, ax2 = plt.subplots(figsize=(8, 5))
-    bars = ax2.bar(sf_data["Check"], sf_data["Safety Factor"], 
-                   color=['#28a745' if v >= 1 else '#dc3545' for v in sf_data["Safety Factor"]])
-    ax2.axhline(1.0, color='red', linestyle='--', label='SF = 1.0 (minimum)')
-    ax2.axhline(1.5, color='orange', linestyle='--', label='SF = 1.5 (recommended)')
-    ax2.set_ylabel("Safety Factor")
-    ax2.set_title("Gear Safety Factors")
-    ax2.legend()
-    plt.xticks(rotation=45)
-    st.pyplot(fig2)
-    
-    # Force distribution
-    st.markdown("### Force Distribution")
-    force_labels = ["Ft (Sun-Planet)", "Ft (Ring-Planet)", 
-                     "Fr (Sun-Planet)", "Fr (Ring-Planet)"]
-    force_values = [loads["Ft_SP"], loads["Ft_RP"], loads["Fr_SP"], loads["Fr_RP"]]
-    
-    fig3, ax3 = plt.subplots(figsize=(8, 5))
-    wedges, texts, autotexts = ax3.pie(
-        force_values, labels=force_labels, autopct='%1.1f%%',
-        colors=['#D9531E', '#EDB120', '#5C88C5', '#66CC99']
+    # Assembly view
+    st.markdown("### Full Assembly")
+    fig_asm = create_assembly_3d(
+        int(zs), int(zp), int(zr), module, nplanets, pin['d_pin'], b,
+        din, dout, sun_geom, planet_geom, ring_geom, comp
     )
-    ax3.set_title("Mesh Force Distribution")
-    st.pyplot(fig3)
+    st.plotly_chart(fig_asm, use_container_width=True)
+    
+    # Individual components
+    st.markdown("### Individual Components")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**Sun Gear**")
+        fig_sun = create_component_3d_view('Sun Gear', {
+            'z': int(zs), 'm': module, 'face_width': b,
+            'hub_od': comp['sun']['hub_od'], 'bore_d': comp['sun']['bore_d']
+        })
+        st.plotly_chart(fig_sun, use_container_width=True)
+    
+    with col2:
+        st.markdown("**Planet Gear**")
+        fig_planet = create_component_3d_view('Planet Gear', {
+            'z': int(zp), 'm': module, 'face_width': b,
+            'hub_od': comp['planet']['hub_od'], 'bore_d': comp['planet']['bore_d']
+        })
+        st.plotly_chart(fig_planet, use_container_width=True)
+    
+    with col3:
+        st.markdown("**Ring Gear**")
+        fig_ring = create_component_3d_view('Ring Gear', {
+            'z': int(zr), 'm': module, 'face_width': b+2.0,
+            'outer_d': comp['ring']['outer_d']
+        })
+        st.plotly_chart(fig_ring, use_container_width=True)
+    
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        st.markdown("**Carrier**")
+        fig_carrier = create_component_3d_view('Carrier', {
+            'pitch_radius': (sun_geom['pitch_d'] + planet_geom['pitch_d'])/2.0,
+            'd_pin': pin['d_pin'], 'n_planets': nplanets,
+            'plate_thickness': comp['carrier']['plate_thickness'],
+            'hub_od': comp['carrier']['hub_od'],
+            'bore_d': comp['carrier']['output_bore']
+        })
+        st.plotly_chart(fig_carrier, use_container_width=True)
+    
+    with col5:
+        st.markdown("**Input Shaft**")
+        fig_in = create_component_3d_view('Input Shaft', {
+            'diameter': din, 'length': comp['input_shaft']['length']
+        })
+        st.plotly_chart(fig_in, use_container_width=True)
+    
+    with col6:
+        st.markdown("**Output Shaft**")
+        fig_out = create_component_3d_view('Output Shaft', {
+            'diameter': dout, 'length': comp['output_shaft']['length']
+        })
+        st.plotly_chart(fig_out, use_container_width=True)
+    
+    col7, col8 = st.columns(2)
+    with col7:
+        st.markdown("**Planet Pin**")
+        fig_pin = create_component_3d_view('Planet Pin', {
+            'diameter': pin['d_pin'], 'length': comp['planet_pin']['total_length']
+        })
+        st.plotly_chart(fig_pin, use_container_width=True)
 
 # ================================================================
-# EXPORT SECTION
+# PASTABLE INPUT FORMAT
 # ================================================================
 st.divider()
-st.subheader("📋 Export Design Data")
-
-# Combine all data into a comprehensive export
-export_data = {
-    "Configuration": {
-        "Type": "Single-Stage Planetary",
-        "Ratio": ratio_actual,
-        "Input Torque (N·m)": tin,
-        "Input Speed (rpm)": nin,
-        "Motor Power (kW)": motor_power_manual,
-        "Design Torque (N·m)": design_out,
-        "Module (mm)": module,
-        "Face Width (mm)": b,
-        "Number of Planets": DEFAULT_PLANETS
-    },
-    "Teeth": {
-        "Sun": zs,
-        "Planet": zp,
-        "Ring": zr
-    },
-    "Diameters (mm)": {
-        "Sun Pitch": geom_sun["pitch_d"],
-        "Planet Pitch": geom_planet["pitch_d"],
-        "Ring Pitch": geom_ring["pitch_d"],
-        "Sun Tip": geom_sun["tip_d"],
-        "Planet Tip": geom_planet["tip_d"],
-        "Ring Tip": geom_ring["tip_d"],
-        "Sun Root": geom_sun["root_d"],
-        "Planet Root": geom_planet["root_d"],
-        "Ring Root": geom_ring["root_d"]
-    },
-    "Stresses (MPa)": {
-        "Bending Sun": stress["sigmaF_SP"],
-        "Bending Planet": stress["sigmaF_planet"],
-        "Contact Sun": stress["sigmaH_SP"],
-        "Contact Ring": stress["sigmaH_RP"]
-    },
-    "Forces (N)": {
-        "Tangential SP": loads["Ft_SP"],
-        "Tangential RP": loads["Ft_RP"],
-        "Radial SP": loads["Fr_SP"],
-        "Radial RP": loads["Fr_RP"],
-        "Normal SP": loads["Fn_SP"],
-        "Normal RP": loads["Fn_RP"],
-        "Pin Load": stress["F_pin"]
-    },
-    "Component Dimensions (mm)": {
-        "Input Shaft Dia": din,
-        "Output Shaft Dia": dout,
-        "Planet Pin Dia": pin["d_pin"],
-        "Ring OD": comps["ring_gear"]["outer_d"],
-        "Carrier OD": comps["carrier"]["plate_od"],
-        "Housing OD": comps["housing"]["outer_d"]
+with st.expander("📋 Pastable Input Configuration"):
+    st.markdown("""
+    **Copy this JSON format to save/load your design configuration:**
+    ```json
+    {
+        "input_torque_nm": 5.0,
+        "input_speed_rpm": 1500.0,
+        "motor_power_kw": 0.785,
+        "efficiency": 0.97,
+        "design_output_torque_nm": 75.0,
+        "target_ratio": 9.0,
+        "n_planets": 3,
+        "pressure_angle_deg": 20.0,
+        "helix_angle_deg": 0.0,
+        "max_od_mm": 200.0,
+        "sun_teeth": 20,
+        "planet_teeth": 70,
+        "module_mm": 1.0,
+        "face_width_ratio": 12.0,
+        "material": "17CrNiMo6 / 18CrNiMo7-6 (Case Carburized)",
+        "asme_kb": 1.5,
+        "asme_kt": 1.2,
+        "keyway_kw": 1.3,
+        "bearing_sf": 1.5,
+        "pin_span_mm": 30.0,
+        "allowable_pin_pressure_mpa": 25.0,
+        "force_angle_deg": 120.0
     }
-}
-
-# Convert to DataFrame for export
-export_rows = []
-for category, items in export_data.items():
-    for param, value in items.items():
-        export_rows.append({
-            "Category": category,
-            "Parameter": param,
-            "Value": value
-        })
-
-export_df = pd.DataFrame(export_rows)
-st.download_button(
-    "⬇️ Download Complete Design Data (CSV)",
-    export_df.to_csv(index=False),
-    "planetary_gearbox_design.csv",
-    "text/csv",
-    key="download_full"
-)
-
-# Summary text export
-summary_text = f"""PLANETARY GEARBOX DESIGN SUMMARY
-================================
-Configuration: Single-Stage Planetary (Ring Fixed)
-Ratio: 1:{ratio_actual:.3f} (Target 1:{ratio_target:.1f})
-
-OPERATING CONDITIONS
-- Input Torque: {tin:.2f} N·m
-- Input Speed: {nin:.0f} rpm
-- Motor Power: {motor_power_manual:.3f} kW
-- Output Speed: {nin/ratio_actual:.1f} rpm
-- Design Output Torque: {design_out:.1f} N·m
-
-GEAR TOOTHING
-- Sun: {zs} teeth
-- Planet: {zp} teeth × {DEFAULT_PLANETS}
-- Ring: {zr} teeth
-- Module: {module:.2f} mm
-- Face Width: {b:.1f} mm
-
-DIAMETERS (mm)
-- Sun Pitch/Base: {geom_sun['pitch_d']:.2f}/{geom_sun['base_d']:.2f}
-- Planet Pitch/Base: {geom_planet['pitch_d']:.2f}/{geom_planet['base_d']:.2f}
-- Ring Pitch/Base: {geom_ring['pitch_d']:.2f}/{geom_ring['base_d']:.2f}
-
-FORCES (N)
-- Tangential SP: {loads['Ft_SP']:.2f}
-- Tangential RP: {loads['Ft_RP']:.2f}
-- Normal SP: {loads['Fn_SP']:.2f}
-- Normal RP: {loads['Fn_RP']:.2f}
-- Planet Pin Load: {stress['F_pin']:.2f}
-
-STRESSES (MPa)
-- Bending SP: {stress['sigmaF_SP']:.1f} (allow {mat['sigmaF']:.0f})
-- Bending RP: {stress['sigmaF_RP']:.1f}
-- Combined Planet: {stress['sigmaF_planet']:.1f}
-- Contact SP: {stress['sigmaH_SP']:.1f} (allow {mat['sigmaH']:.0f})
-- Contact RP: {stress['sigmaH_RP']:.1f}
-
-COMPONENT SIZES
-- Input Shaft: ⌀{din:.2f} mm
-- Output Shaft: ⌀{dout:.2f} mm
-- Planet Pin: ⌀{pin['d_pin']:.2f} mm
-- Ring Gear OD: {comps['ring_gear']['outer_d']:.1f} mm
-- Carrier OD: {comps['carrier']['plate_od']:.1f} mm
-- Housing OD: {comps['housing']['outer_d']:.1f} mm
-
-STATUS: {'PASS ✅' if overall_ok else 'REVIEW REQUIRED ⚠️'}
-"""
-
-st.download_button(
-    "⬇️ Download Design Summary (TXT)",
-    summary_text,
-    "planetary_gearbox_summary.txt",
-    "text/plain",
-    key="download_summary"
-)
-
-# Footer
-st.markdown("---")
-st.caption("""
-**⚠️ DISCLAIMER:** This is a preliminary design/screening tool using simplified 
-ISO-6336-lite, ASME shaft code, and Lundberg-Palmgren bearing life equations. 
-For production/certified design, verify all results against full standards:
-- ISO 6336 (Gear Rating)
-- AGMA 2001-B88
-- ISO 281 (Bearing Life)
-- ASME B106.1M (Shaft Design)
-Final manufacturing drawings should include: tolerances, surface finish, 
-heat treatment specifications, and quality control requirements.
-""")

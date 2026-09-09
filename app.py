@@ -14,7 +14,7 @@ import struct
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from dataclasses import dataclass, field
+from dataclasses import dataclass, asdict
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -119,40 +119,6 @@ class ComponentDimensions:
                             "Parameter": param.replace('_', ' ').title(),
                             "Value": value, "Unit": "mm"})
         return pd.DataFrame(rows)
-
-@dataclass
-class StressResults:
-    """Complete stress analysis results"""
-    # Bending stresses (MPa)
-    sigmaF_sun_planet: float
-    sigmaF_ring_planet: float
-    sigmaF_planet_combined: float
-    # Contact stresses (MPa)
-    sigmaH_sun_planet: float
-    sigmaH_ring_planet: float
-    # Safety factors
-    SF_bending_sun: float
-    SF_bending_planet: float
-    SF_contact_sun: float
-    SF_contact_ring: float
-    # Forces (N)
-    Ft_sun_planet: float
-    Ft_ring_planet: float
-    Fr_sun_planet: float
-    Fr_ring_planet: float
-    Fn_sun_planet: float
-    Fn_ring_planet: float
-    F_planet_pin: float
-
-@dataclass
-class DeflectionResults:
-    """Deflection and stiffness results"""
-    sun_deflection: float  # mm
-    ring_deflection: float  # mm
-    carrier_deflection: float  # mm
-    shaft_torsional_angle_input: float  # degrees
-    shaft_torsional_angle_output: float  # degrees
-    tooth_deflection: float  # mm
 
 # ================================================================
 # GEOMETRY CALCULATIONS
@@ -626,6 +592,22 @@ def create_gearbox_schematic(geom_sun, geom_planet, geom_ring, nplanets, d_pin):
     ax.set_title(f"Planetary Gearbox - 1:{DEFAULT_RATIO:.0f} (Ring Fixed)")
     
     return fig
+
+# ================================================================
+# HELPER FUNCTION TO CONVERT DICTIONARY TO DATAFRAME
+# ================================================================
+def components_to_dataframe(components_dict):
+    """Convert component dimensions dictionary to DataFrame"""
+    rows = []
+    for component, dims in components_dict.items():
+        for param, value in dims.items():
+            rows.append({
+                "Component": component.replace('_', ' ').title(),
+                "Parameter": param.replace('_', ' ').title(),
+                "Value": value,
+                "Unit": "mm"
+            })
+    return pd.DataFrame(rows)
 
 # ================================================================
 # STREAMLIT APP
@@ -1181,8 +1163,8 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("🧱 Complete Component Dimensions")
     
-    # Convert dimensions to DataFrame
-    dim_df = comps.to_dataframe()
+    # Convert dimensions to DataFrame using the helper function
+    dim_df = components_to_dataframe(comps)
     st.dataframe(dim_df, hide_index=True, use_container_width=True)
     
     # Detailed breakdown by component

@@ -1581,3 +1581,42 @@ module assembly() {{
 assembly();
 """
     return code
+with tabs[13]:
+    st.subheader("📐 OpenSCAD CAD Model")
+    st.caption("Generate OpenSCAD code for all components and full assembly. You can copy-paste into OpenSCAD or download the file.")
+    
+    # Compute needed parameters
+    sun_hub_od = comp['sun']['hub_od']
+    sun_bore = comp['sun']['bore_d']
+    planet_hub_od = comp['planet']['hub_od']
+    planet_bore = comp['planet']['bore_d']
+    ring_outer_d = comp['ring']['outer_d']
+    ring_face_width = comp['ring']['face_width']
+    carrier_pitch_radius = (sun_geom['pitch_d'] + planet_geom['pitch_d']) / 2.0
+    carrier_plate_thk = comp['carrier']['plate_thickness']
+    carrier_hub_od = comp['carrier']['hub_od']
+    carrier_bore = comp['carrier']['output_bore']
+    
+    # Generate OpenSCAD code
+    openscad_code = generate_openscad_assembly(
+        zs, zp, zr, module, nplanets, pin['d_pin'], b,
+        sun_hub_od, sun_bore,
+        planet_hub_od, planet_bore,
+        ring_outer_d, ring_face_width,
+        carrier_pitch_radius, carrier_plate_thk, carrier_hub_od, carrier_bore,
+        din, dout, pin_span
+    )
+    
+    st.markdown("**Generated OpenSCAD Code**")
+    st.code(openscad_code, language="openscad")
+    
+    # Download button
+    st.download_button(
+        "⬇️ Download OpenSCAD File (.scad)",
+        openscad_code,
+        "planetary_gearbox.scad",
+        "text/plain",
+        key="download_openscad"
+    )
+    
+    st.info("**Note:** This is a simplified gear model. For precise involute profiles, consider using OpenSCAD libraries like `gears.scad` or import from a CAD file.")

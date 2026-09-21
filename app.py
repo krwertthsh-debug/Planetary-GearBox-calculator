@@ -757,78 +757,28 @@ module assembly(exploded = false) {{
         translate([0, 0, b/2 + {carrier_plate_thk:.3f} + ({out_shaft_len:.3f})/2 + (exploded ? gap * 2.5 : gap)])
         output_shaft();
 }}
-
-# ================================================================
-# ADVANCED CAD-STYLE 3D RENDERER (replaces old mesh functions)
-# ================================================================
-
-def _extrude_polygon_with_hole(outer_xy, hole_xy, z0, z1):
-    """
-    Build a watertight extruded solid between an outer polygon and an inner hole.
-    Returns Plotly Mesh3d-ready (x, y, z, i, j, k).
-    Both polygons must be CCW and have matching vertex counts (we resample the hole).
-    """
-    n_out = len(outer_xy)
-    n_in = len(hole_xy)
-    # Resample hole to match outer count so walls connect 1:1
-    if n_in != n_out:
-        t_out = np.linspace(0, 1, n_out, endpoint=False)
-        t_in = np.linspace(0, 1, n_in, endpoint=False)
-        # close the loop for interpolation
-        ho = np.vstack([hole_xy, hole_xy[:1]])
-        hi = np.vstack([hole_xy, hole_xy[:1]])
-        # param by cumulative arc length
-        def resample(poly, n):
-            poly = np.vstack([poly, poly[:1]])
-            d = np.r_[0, np.cumsum(np.linalg.norm(np.diff(poly, axis=0), axis=1))]
-            d /= d[-1]
-            t = np.linspace(0, 1, n, endpoint=False)
-            return np.column_stack([np.interp(t, d, poly[:, 0]),
-                                    np.interp(t, d, poly[:, 1])])
-        hole_xy = resample(hole_xy, n_out)
-
-    outer = np.asarray(outer_xy, dtype=float)
-    hole = np.asarray(hole_xy, dtype=float)
-    n = len(outer)
-
-    # 4 rings of vertices: outer_bot, outer_top, hole_bot, hole_top
-    vx = np.concatenate([outer[:, 0], outer[:, 0], hole[:, 0], hole[:, 0]])
-    vy = np.concatenate([outer[:, 1], outer[:, 1], hole[:, 1], hole[:, 1]])
-    vz = np.concatenate([np.full(n, z0), np.full(n, z1),
-                         np.full(n, z0), np.full(n, z1)])
-
-    I, J, K = [], [], []
-    for i in range(n):
-        ni = (i + 1) % n
-        ob, ot = i, i + n
-        hb, ht = i + 2 * n, i + 3 * n
-        nob, not_ = ni, ni + n
-        nhb, nht = ni + 2 * n, ni + 3 * n
-        # outer wall
-        I += [ob, ot]; J += [nob, nob]; K += [not_, ot]
-        I += [ob, ot]; J += [nob, not_]; K += [not_, ot]
-        # inner wall (reverse winding so it faces inward)
-        I += [hb, ht]; J += [nht, nhb]; K += [nhb, hb]
-        I += [hb, ht]; J += [nht, ht]; K += [nht, hb]
-        # bottom ring (outer_bot -> hole_bot), facing -Z
-        I.append(ob); J.append(hb); K.append(nhb)
-        I.append(ob); J.append(nhb); K.append(nob)
-        # top ring (outer_top -> hole_top), facing +Z
-        I.append(ot); J.append(not_); K.append(nht)
-        I.append(ot); J.append(nht); K.append(ht)
-    return vx, vy, vz, I, J, K
-
-
-def _extrude_disk(outer_xy, z0, z1):
-    """Solid cylinder from a 2D polygon (no hole). Fan-triangulated caps."""
-    outer = np.asarray(outer_xy, dtype=float)
-    n = len(outer)
-    cx, cy = outer[:, 0].mean(), outer[:, 1].mean()
-
-    vx = np.concatenate([outer[:, 0], outer[:, 0], [cx, cx]])
-    vy = np.concatenate([outer[:, 1], outer[:, 1], [cy, cy]])
-    vz = np.concatenate([np.full(n, z0), np.full(n, z1), [z0, z1]])
-
+def involute_tooth_curve(z, m, alpha_deg=20.0, points_per_flank=8):
+    ...
+def full_gear_outline(z, m, alpha_deg=20.0):
+    ...
+def _ring_cap(n, x, y, z0, z1):
+    ...
+def gear_solid_3d(z, m, alpha_deg, face_width, hub_dia=None, bore_dia=None):
+    ...
+def ring_gear_solid_3d(z, m, alpha_deg, face_width, outer_dia):
+    ...
+def carrier_solid_3d(pitch_radius, d_pin, n_planets, plate_thickness, hub_diameter, bore_diameter):
+    ...
+def shaft_solid_3d(diameter, length):
+    ...
+def planet_pin_solid_3d(diameter, length):
+    ...
+def _mesh3d(mesh, color, name, opacity=0.9):
+    ...
+def create_assembly_3d(...):
+    ...
+def create_component_3d_view(...):
+    ...
     c_bot, c_top = 2 * n, 2 * n + 1
     I, J, K = [], [], []
     for i in range(n):
@@ -843,7 +793,35 @@ def _extrude_disk(outer_xy, z0, z1):
         # top fan
         I.append(c_top); J.append(t); K.append(nt)
     return vx, vy, vz, I, J, K
-
+# ================================================================
+# 10. 3D SOLIDS — ADVANCED CAD-STYLE RENDERER
+# ================================================================
+def _extrude_polygon_with_hole(...):
+    ...
+def _extrude_disk(...):
+    ...
+def _tooth_polygon_ccw(...):
+    ...
+def _gear_outline(...):
+    ...
+def _circle(...):
+    ...
+def _mesh_trace(...):
+    ...
+def gear_solid_3d(...):     # (kept for compatibility, returns a list)
+    ...
+def _make_gear_meshes(...):
+    ...
+def ring_gear_solid_3d(...):
+    ...
+def carrier_solid_3d(...):
+    ...
+def shaft_solid_3d(...):
+    ...
+def create_assembly_3d(...):
+    ...
+def create_component_3d_view(...):
+    ...
 
 def _tooth_polygon_ccw(z, m, alpha_deg=20.0, points_per_flank=10):
     """

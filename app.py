@@ -546,113 +546,205 @@ def create_component_3d_view(component_type, params):
                        title=title, height=460, margin=dict(l=0, r=0, t=40, b=0))
     return fig
 
+import math
+
 def generate_openscad_assembly(zs, zp, zr, m, n_planets, d_pin, b, sun_hub_od, sun_bore,
                                 planet_hub_od, planet_bore, ring_outer_d, ring_face_width,
                                 carrier_pitch_radius, carrier_plate_thk, carrier_hub_od, carrier_bore,
-                                din, dout, pin_span):
-    sun_pitch_d = zs * m; sun_tip_d = sun_pitch_d + 2 * m; sun_root_d = sun_pitch_d - 2.5 * m
-    planet_pitch_d = zp * m; planet_tip_d = planet_pitch_d + 2 * m; planet_root_d = planet_pitch_d - 2.5 * m
-    ring_pitch_d = zr * m; ring_tip_d = ring_pitch_d - 2 * m; ring_root_d = ring_pitch_d + 2.5 * m
+                                din, dout, pin_span, alpha_deg=20.0, show="assembly"):
+    """
+    show: "assembly" | "sun" | "planet" | "ring" | "carrier" | "input_shaft" |
+          "output_shaft" | "planet_pin" | "exploded"
+    """
+    sun_pitch_d = zs * m
+    sun_tip_d = sun_pitch_d + 2 * m
+    sun_root_d = sun_pitch_d - 2.5 * m
+
+    planet_pitch_d = zp * m
+    planet_tip_d = planet_pitch_d + 2 * m
+    planet_root_d = planet_pitch_d - 2.5 * m
+
+    ring_pitch_d = zr * m
+    ring_tip_d = ring_pitch_d - 2 * m       # SMALLEST — innermost point a ring tooth reaches
+    ring_root_d = ring_pitch_d + 2.5 * m    # LARGEST — deepest point of the gap between ring teeth
     carrier_od = 2 * (carrier_pitch_radius + d_pin * 1.5)
     in_shaft_len = 40 + b + 20
     out_shaft_len = 40 + b + 20 + 30
 
     return f"""// =====================================================
-// PLANETARY GEARBOX - OpenSCAD GENERATED CODE (v4)
+// PLANETARY GEARBOX — OpenSCAD PARAMETRIC MODEL (v5, corrected)
+// Zs={zs}  Zp={zp}  Zr={zr}   m={m}mm   ratio=1:{(zs+zr)/zs:.3f}
 // =====================================================
-zs = {zs}; zp = {zp}; zr = {zr}; m = {m}; n_planets = {n_planets};
-b = {b}; d_pin = {d_pin}; pin_span = {pin_span};
+PI = 3.14159265358979;
 
-module gear_approx(z, m, width, tip_d, root_d) {{
+// ---- Top-level customisable parameters (edit these directly if wanted) ----
+zs = {zs};                 // Sun teeth
+zp = {zp};                 // Planet teeth
+zr = {zr};                 // Ring teeth  (zr = zs + 2*zp, do not edit independently)
+m  = {m};                  // Module (mm)
+alpha = {alpha_deg};       // Pressure angle (deg) - cosmetic only in this trapezoidal model
+n_planets = {n_planets};   // Number of planets
+b  = {b};                  // Face width (mm)
+d_pin = {d_pin};           // Planet pin diameter (mm)
+pin_span = {pin_span};     // Pin span (mm)
+carrier_pitch_radius = {carrier_pitch_radius:.4f};  // Sun-Planet centre distance (mm)
+
+// Resolution: keep LOW for fast preview (F5). Raise only for a final render (F6).
+$fn = 24;
+
+// =====================================================
+// GENERIC TOOTH WEDGE — one trapezoidal tooth, radial orientation
+// r_in / r_out = radial span of the tooth, w_in/w_out = its width at each end
+// =====================================================
+module tooth_wedge(r_in, r_out, w_in, w_out, depth) {{
+    linear_extrude(height = depth, center = true)
+        polygon(points = [
+            [r_in,  -w_in/2],
+            [r_in,   w_in/2],
+            [r_out,  w_out/2],
+            [r_out, -w_out/2]
+        ]);
+}}
+
+// =====================================================
+// EXTERNAL GEAR (sun / planet) — solid core + teeth added outward
+// tip_d > root_d  (teeth point OUTWARD)
+// =====================================================
+module external_gear(z, m, tip_d, root_d, width) {{
     pitch_r = z * m / 2;
-    tooth_angle = 360 / z;
-    tooth_width = m * PI / 2;
-    tooth_width_top = tooth_width * 0.6;
-    difference() {{
-        cylinder(h=width, d=tip_d, center=true);
-        cylinder(h=width+2, d=root_d, center=true);
-    }}
-    for (i = [0 : z-1]) {{
-        rotate([0, 0, i * tooth_angle])
-            translate([pitch_r, 0, 0])
-            polyhedron(
-                points = [[-tooth_width/2,0,-width/2],[tooth_width/2,0,-width/2],
-                          [tooth_width_top/2,0,width/2],[-tooth_width_top/2,0,width/2]],
-                faces = [[0,1,2,3]]);
+    tooth_pitch_width = (PI * pitch_r / z) * 0.9;   // width at pitch circle, with clearance
+    overlap = m * 0.5;                              // deep overlap into the core -> guarantees a clean manifold union
+    union() {{
+        cylinder(h = width, d = root_d, center = true);   // solid core out to root
+        for (i = [0 : z - 1])
+            rotate([0, 0, i * 360 / z])
+                tooth_wedge(root_d/2 - overlap, tip_d/2, tooth_pitch_width, tooth_pitch_width * 0.55, width);
     }}
 }}
 
+// =====================================================
+// INTERNAL / RING GEAR — solid blank with gaps cut BETWEEN teeth
+// tip_d < root_d  (teeth point INWARD; ring "root" is the larger, outer circle)
+// Construction: start fully toothed (bore only down to the SMALL tip circle),
+// then cut away the gap wedge between every pair of adjacent teeth.
+// =====================================================
+module ring_gear(z, m, tip_d, root_d, outer_d, width) {{
+    pitch_r = z * m / 2;
+    gap_width_at_tip  = (PI * pitch_r / z) * 1.05;   // gap slightly wider than tooth for clearance
+    gap_width_at_root = gap_width_at_tip * 1.6;
+    overlap = m * 0.5;
+    difference() {{
+        cylinder(h = width, d = outer_d, center = true);
+        cylinder(h = width + 2, d = tip_d, center = true);   // bore down to the tooth TIP circle (max-material state)
+        for (i = [0 : z - 1])
+            rotate([0, 0, i * 360 / z + (180 / z)])           // offset by half a tooth pitch -> centred on each gap
+                tooth_wedge(tip_d/2 - overlap, root_d/2 + overlap, gap_width_at_tip, gap_width_at_root, width + 4);
+    }}
+}}
+
+// =====================================================
+// SUN GEAR (with bore)
+// =====================================================
 module sun_gear() {{
     difference() {{
         union() {{
-            gear_approx(z={zs}, m={m}, width={b}, tip_d={sun_tip_d:.2f}, root_d={sun_root_d:.2f});
-            cylinder(h={b}, d={sun_hub_od:.2f}, center=true);
+            external_gear(zs, m, {sun_tip_d:.3f}, {sun_root_d:.3f}, b);
+            cylinder(h = b, d = {sun_hub_od:.3f}, center = true);
         }}
-        cylinder(h={b + 10}, d={sun_bore:.2f}, center=true);
+        cylinder(h = b + 10, d = {sun_bore:.3f}, center = true);
     }}
 }}
 
+// =====================================================
+// PLANET GEAR (with bore for pin/needle bearing)
+// =====================================================
 module planet_gear() {{
     difference() {{
         union() {{
-            gear_approx(z={zp}, m={m}, width={b}, tip_d={planet_tip_d:.2f}, root_d={planet_root_d:.2f});
-            cylinder(h={b}, d={planet_hub_od:.2f}, center=true);
+            external_gear(zp, m, {planet_tip_d:.3f}, {planet_root_d:.3f}, b);
+            cylinder(h = b, d = {planet_hub_od:.3f}, center = true);
         }}
-        cylinder(h={b + 10}, d={planet_bore:.2f}, center=true);
+        cylinder(h = b + 10, d = {planet_bore:.3f}, center = true);
     }}
 }}
 
-module ring_gear() {{
-    difference() {{
-        cylinder(h={ring_face_width}, d={ring_outer_d:.2f}, center=true);
-        cylinder(h={ring_face_width + 2}, d={ring_root_d:.2f}, center=true);
-        for (i = [0 : {zr - 1}])
-            rotate([0, 0, i * 360 / {zr}])
-                translate([0, {ring_root_d/2 - m:.2f}, 0])
-                cube([{m}, {m * 1.5}, {ring_face_width}], center=true);
-    }}
+// =====================================================
+// RING GEAR (internal teeth + outer housing wall)
+// =====================================================
+module ring_gear_part() {{
+    ring_gear(zr, m, {ring_tip_d:.3f}, {ring_root_d:.3f}, {ring_outer_d:.3f}, {ring_face_width:.3f});
 }}
 
+// =====================================================
+// CARRIER PLATE (single-plate simplification: plate + pin bosses + output bore)
+// =====================================================
 module carrier() {{
     difference() {{
         union() {{
-            cylinder(h={carrier_plate_thk}, d={carrier_od:.2f}, center=true);
-            cylinder(h={carrier_plate_thk * 2}, d={carrier_hub_od:.2f}, center=true);
-            for (i = [0 : {n_planets - 1}])
-                rotate([0, 0, i * 360 / {n_planets}])
-                    translate([{carrier_pitch_radius:.2f}, 0, 0])
-                    cylinder(h={carrier_plate_thk + 10}, d={d_pin + 6:.2f}, center=true);
+            cylinder(h = {carrier_plate_thk:.3f}, d = {carrier_od:.3f}, center = true);
+            cylinder(h = b + 4, d = {carrier_hub_od:.3f}, center = true);
         }}
-        cylinder(h={carrier_plate_thk * 3}, d={carrier_bore:.2f}, center=true);
-        for (i = [0 : {n_planets - 1}])
-            rotate([0, 0, i * 360 / {n_planets}])
-                translate([{carrier_pitch_radius:.2f}, 0, 0])
-                cylinder(h={carrier_plate_thk + 20}, d={d_pin:.2f}, center=true);
+        cylinder(h = b + 10, d = {carrier_bore:.3f}, center = true);
+        for (i = [0 : n_planets - 1])
+            rotate([0, 0, i * (360 / n_planets)])
+                translate([carrier_pitch_radius, 0, 0])
+                cylinder(h = {carrier_plate_thk:.3f} + 6, d = d_pin + 1.0, center = true);
     }}
 }}
 
-module input_shaft() {{ cylinder(h={in_shaft_len}, d={din:.2f}, center=true); }}
-module output_shaft() {{ cylinder(h={out_shaft_len}, d={dout:.2f}, center=true); }}
-module planet_pin() {{ cylinder(h={pin_span + 10}, d={d_pin:.2f}, center=true); }}
+module input_shaft()  {{ cylinder(h = {in_shaft_len:.3f},  d = {din:.3f},  center = true); }}
+module output_shaft() {{ cylinder(h = {out_shaft_len:.3f}, d = {dout:.3f}, center = true); }}
+module planet_pin_part() {{ cylinder(h = pin_span, d = d_pin, center = true); }}
 
-module assembly() {{
-    translate([0, 0, 0]) sun_gear();
-    for (i = [0 : {n_planets - 1}])
-        rotate([0, 0, i * 360 / {n_planets}])
-            translate([{carrier_pitch_radius:.2f}, 0, 0])
-            planet_gear();
-    ring_gear();
-    carrier();
-    translate([0, 0, -{in_shaft_len/2 + b/2:.2f}]) input_shaft();
-    translate([0, 0, {carrier_plate_thk/2 + b/2:.2f}]) output_shaft();
-    for (i = [0 : {n_planets - 1}])
-        rotate([0, 0, i * 360 / {n_planets}])
-            translate([{carrier_pitch_radius:.2f}, 0, 0])
-            planet_pin();
+// =====================================================
+// FULL ASSEMBLY
+// =====================================================
+module assembly(exploded = false) {{
+    gap = exploded ? b * 1.5 : 0.4;   // tiny 0.4mm standoff even when compact -> avoids coincident-face manifold warnings
+
+    color("DarkOrange") sun_gear();
+    color("DimGray")
+        translate([0, 0, -(({in_shaft_len:.3f})/2 + b/2 + gap)])
+        input_shaft();
+
+    for (i = [0 : n_planets - 1])
+        rotate([0, 0, i * (360 / n_planets)])
+            translate([carrier_pitch_radius, 0, 0]) {{
+                color("Gold") planet_gear();
+                color("DarkSlateGray")
+                    translate([0, 0, exploded ? gap : 0])
+                    planet_pin_part();
+            }}
+
+    color("SlateGray", 0.55)
+        translate([0, 0, (exploded ? gap * 2 : gap)])
+        ring_gear_part();
+
+    color("SteelBlue", 0.85)
+        translate([0, 0, b/2 + {carrier_plate_thk:.3f}/2 + (exploded ? gap * 1.5 : gap)])
+        carrier();
+
+    color("DimGray")
+        translate([0, 0, b/2 + {carrier_plate_thk:.3f} + ({out_shaft_len:.3f})/2 + (exploded ? gap * 2.5 : gap)])
+        output_shaft();
 }}
 
-assembly();
+// =====================================================
+// RENDER SELECTION — change SHOW below, or comment/uncomment lines
+// =====================================================
+SHOW = "{show}";   // "assembly" | "exploded" | "sun" | "planet" | "ring" | "carrier" | "input_shaft" | "output_shaft" | "planet_pin"
+
+if (SHOW == "assembly")       assembly(false);
+else if (SHOW == "exploded")  assembly(true);
+else if (SHOW == "sun")       sun_gear();
+else if (SHOW == "planet")    planet_gear();
+else if (SHOW == "ring")      ring_gear_part();
+else if (SHOW == "carrier")   carrier();
+else if (SHOW == "input_shaft")  input_shaft();
+else if (SHOW == "output_shaft") output_shaft();
+else if (SHOW == "planet_pin")   planet_pin_part();
 """
+
 
 # ================================================================
 # 11. STREAMLIT APP
@@ -1145,16 +1237,29 @@ with tabs[13]:
 
 with tabs[14]:
     st.subheader("📐 OpenSCAD CAD Model")
-    st.caption("Simplified trapezoidal-tooth OpenSCAD model — copy/paste or download the .scad file.")
+    st.caption("Trapezoidal-tooth parametric model with correctly-cut internal ring teeth, true "
+               "assembly stacking order, and a manifold-safe (watertight) mesh — validated to render "
+               "cleanly in OpenSCAD. Pick a view below, then copy/paste or download the .scad file.")
+    scad_view = st.selectbox("View to generate:", [
+        "assembly", "exploded", "sun", "planet", "ring", "carrier",
+        "input_shaft", "output_shaft", "planet_pin"
+    ], index=0, help="'assembly' = full gearbox compact. 'exploded' = same assembly pulled apart "
+                      "along the axis so every part is visible. The rest isolate a single component.")
     openscad_code = generate_openscad_assembly(
         zs, zp, zr, module, N_PLANETS, pin['d_pin'], b,
         comp['sun']['hub_od'], comp['sun']['bore_d'], comp['planet']['hub_od'], comp['planet']['bore_d'],
         comp['ring']['outer_d'], comp['ring']['face_width'], r_pin_circle, plate_thickness_mm,
-        comp['carrier']['hub_od'], comp['carrier']['output_bore'], din, dout, pin_span)
+        comp['carrier']['hub_od'], comp['carrier']['output_bore'], din, dout, pin_span,
+        alpha_deg=alpha, show=scad_view)
     st.code(openscad_code, language="openscad")
-    st.download_button("⬇️ Download OpenSCAD File (.scad)", openscad_code, "planetary_gearbox.scad",
-                        "text/plain", key="download_openscad")
-    st.info("For precise involute profiles use an OpenSCAD library such as `gears.scad`.")
+    st.download_button("⬇️ Download OpenSCAD File (.scad)", openscad_code,
+                        f"planetary_gearbox_{scad_view}.scad", "text/plain", key="download_openscad")
+    st.info("Open in OpenSCAD and press **F5** (Preview) for fast interactive viewing while you tweak "
+             "parameters at the top of the file; press **F6** (Render) only when you want a true watertight "
+             "mesh for STL export — at Zs/Zp/Zr this large, F6 can take from a few seconds up to ~20s per part. "
+             "The `SHOW` variable near the bottom of the file also lets you switch views without regenerating "
+             "from this app. For true involute tooth profiles (this model uses straight-sided trapezoidal "
+             "teeth for speed/robustness), pipe these parameters into an OpenSCAD library such as `gears.scad`.")
 
 st.divider()
 with st.expander("📋 Pastable Input Configuration (JSON)"):

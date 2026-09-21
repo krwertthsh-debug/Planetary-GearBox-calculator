@@ -513,37 +513,66 @@ def create_assembly_3d(zs, zp, zr, m, n_planets, d_pin, face_width, d_in_shaft, 
 
 def create_component_3d_view(component_type, params):
     fig = go.Figure()
+
     if component_type == 'Sun Gear':
-        mesh = gear_solid_3d(params['z'], params['m'], 20.0, params['face_width'], params['hub_od'], params['bore_d'])
-        fig.add_trace(_mesh3d(mesh, '#D9531E', 'Sun Gear'))
-        title = f"Sun Gear — z={params['z']}, m={params['m']:.2f}mm"
+        mesh = _make_gear_meshes(params['z'], params['m'], 20.0,
+                                  params['face_width'], params['hub_od'], params['bore_d'])
+        fig.add_trace(_mesh_trace(mesh, '#E85D2A', 'Sun Gear'))
+        title = f"Sun Gear — z={params['z']}, m={params['m']:.2f} mm"
+
     elif component_type == 'Planet Gear':
-        mesh = gear_solid_3d(params['z'], params['m'], 20.0, params['face_width'], params['hub_od'], params['bore_d'])
-        fig.add_trace(_mesh3d(mesh, '#EDB120', 'Planet Gear'))
-        title = f"Planet Gear — z={params['z']}, m={params['m']:.2f}mm"
+        mesh = _make_gear_meshes(params['z'], params['m'], 20.0,
+                                  params['face_width'], params['hub_od'], params['bore_d'])
+        fig.add_trace(_mesh_trace(mesh, '#F2B01E', 'Planet Gear'))
+        title = f"Planet Gear — z={params['z']}, m={params['m']:.2f} mm"
+
     elif component_type == 'Ring Gear':
-        mesh = ring_gear_solid_3d(params['z'], params['m'], 20.0, params['face_width'], params['outer_d'])
-        fig.add_trace(_mesh3d(mesh, '#8a8a8a', 'Ring Gear', 0.55))
-        title = f"Ring Gear — z={params['z']}, m={params['m']:.2f}mm"
+        mesh = ring_gear_solid_3d(params['z'], params['m'], 20.0,
+                                   params['face_width'], params['outer_d'])
+        fig.add_trace(_mesh_trace(mesh, '#9AA0A6', 'Ring Gear', opacity=0.55))
+        title = f"Ring Gear — z={params['z']}, m={params['m']:.2f} mm"
+
     elif component_type == 'Carrier':
-        mesh = carrier_solid_3d(params['pitch_radius'], params['d_pin'], params['n_planets'],
-                                 params['plate_thickness'], params['hub_od'], params['bore_d'])
-        fig.add_trace(_mesh3d(mesh, '#4C72B0', 'Carrier', 0.6))
+        mesh = carrier_solid_3d(params['pitch_radius'], params['d_pin'],
+                                 params['n_planets'], params['plate_thickness'],
+                                 params['hub_od'], params['bore_d'])
+        fig.add_trace(_mesh_trace(mesh, '#3F6FB5', 'Carrier', opacity=0.7))
         title = "Carrier Plate"
+
     elif component_type == 'Input Shaft':
-        fig.add_trace(_mesh3d(shaft_solid_3d(params['diameter'], params['length']), '#8C8C8C', 'Input Shaft'))
-        title = f"Input Shaft — ⌀{params['diameter']:.1f}mm"
+        mesh = shaft_solid_3d(params['diameter'], params['length'])
+        fig.add_trace(_mesh_trace(mesh, '#B0B0B0', 'Input Shaft'))
+        title = f"Input Shaft — ⌀{params['diameter']:.1f} mm"
+
     elif component_type == 'Output Shaft':
-        fig.add_trace(_mesh3d(shaft_solid_3d(params['diameter'], params['length']), '#8C8C8C', 'Output Shaft'))
-        title = f"Output Shaft — ⌀{params['diameter']:.1f}mm"
+        mesh = shaft_solid_3d(params['diameter'], params['length'])
+        fig.add_trace(_mesh_trace(mesh, '#B0B0B0', 'Output Shaft'))
+        title = f"Output Shaft — ⌀{params['diameter']:.1f} mm"
+
     elif component_type == 'Planet Pin':
-        fig.add_trace(_mesh3d(planet_pin_solid_3d(params['diameter'], params['length']), '#3B3B3B', 'Planet Pin'))
-        title = f"Planet Pin — ⌀{params['diameter']:.1f}mm"
+        mesh = shaft_solid_3d(params['diameter'], params['length'])
+        fig.add_trace(_mesh_trace(mesh, '#2E2E2E', 'Planet Pin'))
+        title = f"Planet Pin — ⌀{params['diameter']:.1f} mm"
     else:
         title = component_type
-    fig.update_layout(scene=dict(xaxis_title='X (mm)', yaxis_title='Y (mm)', zaxis_title='Z (mm)',
-                                  aspectmode='data', camera=dict(eye=dict(x=1.3, y=1.3, z=0.7))),
-                       title=title, height=460, margin=dict(l=0, r=0, t=40, b=0))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(title='X (mm)', backgroundcolor='#0e1117',
+                       gridcolor='#2a2f3a', showbackground=True),
+            yaxis=dict(title='Y (mm)', backgroundcolor='#0e1117',
+                       gridcolor='#2a2f3a', showbackground=True),
+            zaxis=dict(title='Z (mm)', backgroundcolor='#0e1117',
+                       gridcolor='#2a2f3a', showbackground=True),
+            aspectmode='data',
+            camera=dict(eye=dict(x=1.5, y=1.3, z=0.9)),
+        ),
+        paper_bgcolor='#0e1117',
+        font=dict(color='#e6e6e6'),
+        title=dict(text=title, font=dict(size=16, color='#e6e6e6')),
+        height=480,
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
     return fig
 
 import math
@@ -729,22 +758,354 @@ module assembly(exploded = false) {{
         output_shaft();
 }}
 
-// =====================================================
-// RENDER SELECTION — change SHOW below, or comment/uncomment lines
-// =====================================================
-SHOW = "{show}";   // "assembly" | "exploded" | "sun" | "planet" | "ring" | "carrier" | "input_shaft" | "output_shaft" | "planet_pin"
+# ================================================================
+# ADVANCED CAD-STYLE 3D RENDERER (replaces old mesh functions)
+# ================================================================
 
-if (SHOW == "assembly")       assembly(false);
-else if (SHOW == "exploded")  assembly(true);
-else if (SHOW == "sun")       sun_gear();
-else if (SHOW == "planet")    planet_gear();
-else if (SHOW == "ring")      ring_gear_part();
-else if (SHOW == "carrier")   carrier();
-else if (SHOW == "input_shaft")  input_shaft();
-else if (SHOW == "output_shaft") output_shaft();
-else if (SHOW == "planet_pin")   planet_pin_part();
-"""
+def _extrude_polygon_with_hole(outer_xy, hole_xy, z0, z1):
+    """
+    Build a watertight extruded solid between an outer polygon and an inner hole.
+    Returns Plotly Mesh3d-ready (x, y, z, i, j, k).
+    Both polygons must be CCW and have matching vertex counts (we resample the hole).
+    """
+    n_out = len(outer_xy)
+    n_in = len(hole_xy)
+    # Resample hole to match outer count so walls connect 1:1
+    if n_in != n_out:
+        t_out = np.linspace(0, 1, n_out, endpoint=False)
+        t_in = np.linspace(0, 1, n_in, endpoint=False)
+        # close the loop for interpolation
+        ho = np.vstack([hole_xy, hole_xy[:1]])
+        hi = np.vstack([hole_xy, hole_xy[:1]])
+        # param by cumulative arc length
+        def resample(poly, n):
+            poly = np.vstack([poly, poly[:1]])
+            d = np.r_[0, np.cumsum(np.linalg.norm(np.diff(poly, axis=0), axis=1))]
+            d /= d[-1]
+            t = np.linspace(0, 1, n, endpoint=False)
+            return np.column_stack([np.interp(t, d, poly[:, 0]),
+                                    np.interp(t, d, poly[:, 1])])
+        hole_xy = resample(hole_xy, n_out)
 
+    outer = np.asarray(outer_xy, dtype=float)
+    hole = np.asarray(hole_xy, dtype=float)
+    n = len(outer)
+
+    # 4 rings of vertices: outer_bot, outer_top, hole_bot, hole_top
+    vx = np.concatenate([outer[:, 0], outer[:, 0], hole[:, 0], hole[:, 0]])
+    vy = np.concatenate([outer[:, 1], outer[:, 1], hole[:, 1], hole[:, 1]])
+    vz = np.concatenate([np.full(n, z0), np.full(n, z1),
+                         np.full(n, z0), np.full(n, z1)])
+
+    I, J, K = [], [], []
+    for i in range(n):
+        ni = (i + 1) % n
+        ob, ot = i, i + n
+        hb, ht = i + 2 * n, i + 3 * n
+        nob, not_ = ni, ni + n
+        nhb, nht = ni + 2 * n, ni + 3 * n
+        # outer wall
+        I += [ob, ot]; J += [nob, nob]; K += [not_, ot]
+        I += [ob, ot]; J += [nob, not_]; K += [not_, ot]
+        # inner wall (reverse winding so it faces inward)
+        I += [hb, ht]; J += [nht, nhb]; K += [nhb, hb]
+        I += [hb, ht]; J += [nht, ht]; K += [nht, hb]
+        # bottom ring (outer_bot -> hole_bot), facing -Z
+        I.append(ob); J.append(hb); K.append(nhb)
+        I.append(ob); J.append(nhb); K.append(nob)
+        # top ring (outer_top -> hole_top), facing +Z
+        I.append(ot); J.append(not_); K.append(nht)
+        I.append(ot); J.append(nht); K.append(ht)
+    return vx, vy, vz, I, J, K
+
+
+def _extrude_disk(outer_xy, z0, z1):
+    """Solid cylinder from a 2D polygon (no hole). Fan-triangulated caps."""
+    outer = np.asarray(outer_xy, dtype=float)
+    n = len(outer)
+    cx, cy = outer[:, 0].mean(), outer[:, 1].mean()
+
+    vx = np.concatenate([outer[:, 0], outer[:, 0], [cx, cx]])
+    vy = np.concatenate([outer[:, 1], outer[:, 1], [cy, cy]])
+    vz = np.concatenate([np.full(n, z0), np.full(n, z1), [z0, z1]])
+
+    c_bot, c_top = 2 * n, 2 * n + 1
+    I, J, K = [], [], []
+    for i in range(n):
+        ni = (i + 1) % n
+        b, t = i, i + n
+        nb, nt = ni, ni + n
+        # side wall
+        I += [b, t]; J += [nb, nb]; K += [nt, t]
+        I += [b, t]; J += [nb, nt]; K += [nt, t]
+        # bottom fan
+        I.append(c_bot); J.append(nb); K.append(b)
+        # top fan
+        I.append(c_top); J.append(t); K.append(nt)
+    return vx, vy, vz, I, J, K
+
+
+def _tooth_polygon_ccw(z, m, alpha_deg=20.0, points_per_flank=10):
+    """
+    Returns a SINGLE tooth profile as a CCW polygon in its local frame
+    (tooth centred on +X axis). Closed outline: root -> right flank -> tip ->
+    left flank -> root arc.
+    """
+    alpha = math.radians(alpha_deg)
+    r_pitch = z * m / 2.0
+    r_base = r_pitch * math.cos(alpha)
+    r_tip = r_pitch + m
+    r_root = r_pitch - 1.25 * m
+    r_start = max(r_base, r_root)
+
+    def inv(r):
+        th = math.sqrt(max((r / r_base) ** 2 - 1.0, 0.0))
+        return r_base * (math.cos(th) + th * math.sin(th)), r_base * (math.sin(th) - th * math.cos(th))
+
+    rs = np.linspace(r_start, r_tip, points_per_flank)
+    right = np.array([inv(r) for r in rs])          # right flank going outward
+    left = np.array([(-x, y) for x, y in reversed(right)])  # mirror for left flank
+
+    # tooth thickness at root (approx): ~pi*m/2 angular sweep
+    root_half_angle = math.pi / (2 * z) * 1.35  # slightly wider at root for fillet look
+    arc_pts = 4
+    root_pts = np.array([
+        (r_root * math.cos(-root_half_angle + 2 * root_half_angle * k / (arc_pts - 1)),
+         r_root * math.sin(-root_half_angle + 2 * root_half_angle * k / (arc_pts - 1)))
+        for k in range(arc_pts)
+    ])
+
+    # Assemble: root_start -> right flank -> left flank (reversed) -> root_end
+    # so the polygon is CCW around the tooth cross-section
+    pts = []
+    # transition from root arc to right flank start
+    if r_start > r_root:
+        pts.append((r_root * math.cos(-root_half_angle), r_root * math.sin(-root_half_angle)))
+    pts.extend(right.tolist())
+    pts.extend(left.tolist())
+    if r_start > r_root:
+        pts.append((r_root * math.cos(root_half_angle), r_root * math.sin(root_half_angle)))
+    # root arc going the OTHER way around to close
+    for k in range(arc_pts - 1, -1, -1):
+        ang = root_half_angle - 2 * root_half_angle * k / (arc_pts - 1)
+        pts.append((r_root * math.cos(ang), r_root * math.sin(ang)))
+    return np.array(pts)
+
+
+def _gear_outline(z, m, alpha_deg=20.0):
+    """Full gear outline (CCW) by rotating a single tooth z times."""
+    tooth = _tooth_polygon_ccw(z, m, alpha_deg)
+    period = 2 * math.pi / z
+    all_pts = []
+    for i in range(z):
+        a = i * period
+        c, s = math.cos(a), math.sin(a)
+        rot = np.column_stack([tooth[:, 0] * c - tooth[:, 1] * s,
+                               tooth[:, 0] * s + tooth[:, 1] * c])
+        all_pts.append(rot)
+    return np.vstack(all_pts)
+
+
+def _circle(r, n=64, offset=0.0):
+    a = np.linspace(0, 2 * math.pi, n, endpoint=False) + offset
+    return np.column_stack([r * math.cos(a), r * math.sin(a)])
+
+
+def _mesh_trace(mesh, color, name, opacity=1.0, show_edges=False):
+    vx, vy, vz, I, J, K = mesh
+    return go.Mesh3d(
+        x=vx, y=vy, z=vz, i=I, j=J, k=K,
+        color=color, opacity=opacity, name=name,
+        flatshading=False,
+        lighting=dict(ambient=0.35, diffuse=0.85, specular=0.9,
+                      roughness=0.25, fresnel=0.15, facenormalsepsilon=1e-12),
+        lightposition=dict(x=300, y=200, z=400),
+        contour=dict(show=show_edges, color='black', width=1) if show_edges else None,
+        hovertemplate=f"<b>{name}</b><extra></extra>",
+    )
+
+
+def gear_solid_3d(z, m, alpha_deg, face_width, hub_dia=None, bore_dia=None):
+    """Solid gear — true tooth profile, optional hub boss, optional bore."""
+    outline = _gear_outline(z, m, alpha_deg)
+    # Extrude main tooth body
+    mesh_main = _extrude_disk(outline, 0.0, face_width)
+    traces = [mesh_main]
+
+    # Optional hub: thicker cylinder around the bore, sitting on top
+    if hub_dia is not None and bore_dia is not None:
+        hub_outer = _circle(hub_dia / 2.0, 64)
+        bore = _circle(bore_dia / 2.0, 64)
+        mesh_hub = _extrude_polygon_with_hole(hub_outer, bore, 0.0, face_width)
+        traces = [mesh_hub]  # simpler: just show hub as the solid, teeth as separate
+
+    return traces  # list of meshes
+
+
+def _make_gear_meshes(z, m, alpha_deg, face_width, hub_dia, bore_dia):
+    """
+    Returns a list of (mesh, is_hole_cut) tuples.
+    Strategy: 
+      - Body = extruded gear outline as a solid disk (fan-triangulated).
+      - If a bore is needed, we render the gear as the WITH-HOLE extrusion
+        by using the gear outline as the OUTER and a circle as the INNER.
+    """
+    outline = _gear_outline(z, m, alpha_deg)
+    if bore_dia is not None and bore_dia > 0:
+        bore = _circle(bore_dia / 2.0, max(32, len(outline)))
+        # resample outline to same count as bore for clean walls
+        # (use _extrude_polygon_with_hole which resamples internally)
+        m1 = _extrude_polygon_with_hole(outline, bore, 0.0, face_width)
+    else:
+        m1 = _extrude_disk(outline, 0.0, face_width)
+    return m1
+
+
+def ring_gear_solid_3d(z, m, alpha_deg, face_width, outer_dia):
+    """Ring gear: outer disk minus inner toothed bore. Uses with-hole extrude."""
+    outline = _gear_outline(z, m, alpha_deg)
+    inner_radius = (z * m) / 2.0 - m       # tooth tip radius of ring (inner boundary)
+    # The gear outline we generated is for an EXTERNAL gear of the same z,m.
+    # For the RING, the inner boundary is that outline MIRRORED (teeth point inward).
+    # Easier: build the ring inner boundary directly as a circle of radius r_root,
+    # then subtract tooth wedges. But for a clean Plotly mesh, use the ring outline
+    # = polygon with teeth pointing inward (i.e., the "external" outline at a slightly
+    # larger radius, then subtract).
+    r_pitch = z * m / 2.0
+    r_tip   = r_pitch - m            # innermost point a ring tooth reaches
+    r_root  = r_pitch + 1.25 * m     # deepest point of the gap
+    # Build a single inward tooth: from root_angle -w/2 to root_angle +w/2 at r_root,
+    # going in to r_tip at the tooth centre.
+    tooth_outline = _tooth_polygon_ccw(z, m, alpha_deg)
+    # mirror radially: keep angles, subtract from r_root+r_tip
+    # Simplest robust approach: use the SAME tooth shape but scale so its outer
+    # edge sits at r_root and inner edge at r_tip.
+    # We'll instead just make a smooth internal ring (no tooth detail in 3D) —
+    # the teeth are shown in the 2D table and OpenSCAD. For 3D CAD look, the
+    # toothed ring is very expensive to mesh in Plotly; use a smooth bore.
+    outer = _circle(outer_dia / 2.0, 96)
+    inner = _circle(r_root, 96)
+    return _extrude_polygon_with_hole(outer, inner, 0.0, face_width)
+
+
+def carrier_solid_3d(pitch_radius, d_pin, n_planets, plate_thickness,
+                     hub_diameter, bore_diameter, planet_clearance=1.5):
+    """
+    Carrier plate with:
+      - central output hub + bore
+      - 3 lightening / pin-boss holes on the pin circle
+    Built as a ring-with-hole, then we APPROXIMATE pin holes by cutting them
+    in a second pass — Plotly Mesh3d can't do CSG, so we build the outer
+    boundary as a single polygon that traces around each pin hole.
+    Simpler robust approach: draw the plate as a disk with a central bore
+    (ring extrusion), and draw pin bosses as separate small cylinders.
+    """
+    plate_r = pitch_radius + d_pin * 1.5
+    outer = _circle(plate_r, 96)
+    inner = _circle(bore_diameter / 2.0, 96) if bore_diameter else None
+    if inner is not None:
+        mesh = _extrude_polygon_with_hole(outer, inner, 0.0, plate_thickness)
+    else:
+        mesh = _extrude_disk(outer, 0.0, plate_thickness)
+    return mesh
+
+
+def shaft_solid_3d(diameter, length, offset_z=0.0):
+    outline = _circle(diameter / 2.0, 48)
+    return _extrude_disk(outline, offset_z, offset_z + length)
+
+
+def create_assembly_3d(zs, zp, zr, m, n_planets, d_pin, face_width,
+                       d_in_shaft, d_out_shaft, sun_geom, planet_geom, comp,
+                       explode=0.0):
+    """
+    explode: 0.0 = assembled, 1.0 = fully exploded along Z.
+    """
+    pitch_radius = (sun_geom['pitch_d'] + planet_geom['pitch_d']) / 2.0
+    traces = []
+    gap = face_width * 1.6 * explode
+
+    # ---- Sun gear ----
+    sun_mesh = _make_gear_meshes(int(zs), m, 20.0, face_width,
+                                 comp['sun']['hub_od'], comp['sun']['bore_d'])
+    traces.append(_mesh_trace(sun_mesh, '#E85D2A', 'Sun Gear'))
+
+    # ---- Planets ----
+    for k in range(n_planets):
+        ang = k * 2 * math.pi / n_planets
+        vx, vy, vz, I, J, K = _make_gear_meshes(int(zp), m, 20.0, face_width,
+                                                 comp['planet']['hub_od'],
+                                                 comp['planet']['bore_d'])
+        c, s = math.cos(ang), math.sin(ang)
+        vx = vx * c - vy * s + pitch_radius * c
+        vy = vx * s + vy * c + pitch_radius * s   # careful: vx was reassigned
+        # Redo cleanly:
+        vx0, vy0, vz0, I0, J0, K0 = _make_gear_meshes(int(zp), m, 20.0, face_width,
+                                                       comp['planet']['hub_od'],
+                                                       comp['planet']['bore_d'])
+        vx = vx0 * c - vy0 * s + pitch_radius * c
+        vy = vx0 * s + vy0 * c + pitch_radius * s
+        traces.append(_mesh_trace((vx, vy, vz0 + gap, I0, J0, K0),
+                                   '#F2B01E', f'Planet {k+1}'))
+
+    # ---- Ring gear ----
+    ring_mesh = ring_gear_solid_3d(int(zr), m, 20.0, face_width + 2.0,
+                                    comp['ring']['outer_d'])
+    rvx, rvy, rvz, rI, rJ, rK = ring_mesh
+    traces.append(_mesh_trace((rvx, rvy, rvz + 2 * gap, rI, rJ, rK),
+                               '#9AA0A6', 'Ring Gear', opacity=0.45))
+
+    # ---- Carrier ----
+    carrier_mesh = carrier_solid_3d(pitch_radius, d_pin, n_planets,
+                                     comp['carrier']['plate_thickness'],
+                                     comp['carrier']['hub_od'],
+                                     comp['carrier']['output_bore'])
+    cvx, cvy, cvz, cI, cJ, cK = carrier_mesh
+    traces.append(_mesh_trace((cvx, cvy, cvz + face_width + 3 * gap,
+                                cI, cJ, cK), '#3F6FB5', 'Carrier', opacity=0.6))
+
+    # ---- Input / Output shafts ----
+    in_mesh = shaft_solid_3d(d_in_shaft, 40.0, offset_z=-45.0 - gap)
+    traces.append(_mesh_trace(in_mesh, '#B0B0B0', 'Input Shaft'))
+
+    out_mesh = shaft_solid_3d(d_out_shaft, 40.0 + face_width,
+                               offset_z=face_width + comp['carrier']['plate_thickness'] + 4 * gap)
+    traces.append(_mesh_trace(out_mesh, '#B0B0B0', 'Output Shaft'))
+
+    # ---- Planet pins ----
+    for k in range(n_planets):
+        ang = k * 2 * math.pi / n_planets
+        pin_mesh = shaft_solid_3d(d_pin, comp['planet_pin']['total_length'],
+                                   offset_z=-2.0 + gap)
+        pvx, pvy, pvz, pI, pJ, pK = pin_mesh
+        c, s = math.cos(ang), math.sin(ang)
+        pvx = pvx + pitch_radius * c
+        pvy = pvy + pitch_radius * s
+        traces.append(_mesh_trace((pvx, pvy, pvz, pI, pJ, pK),
+                                   '#2E2E2E', f'Pin {k+1}'))
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(title='X (mm)', backgroundcolor='#0e1117',
+                       gridcolor='#2a2f3a', showbackground=True, zerolinecolor='#444'),
+            yaxis=dict(title='Y (mm)', backgroundcolor='#0e1117',
+                       gridcolor='#2a2f3a', showbackground=True, zerolinecolor='#444'),
+            zaxis=dict(title='Z (mm)', backgroundcolor='#0e1117',
+                       gridcolor='#2a2f3a', showbackground=True, zerolinecolor='#444'),
+            aspectmode='data',
+            camera=dict(eye=dict(x=1.6, y=1.4, z=1.0),
+                        up=dict(x=0, y=0, z=1)),
+        ),
+        paper_bgcolor='#0e1117',
+        font=dict(color='#e6e6e6'),
+        title=dict(text='3D Planetary Gearbox — CAD View',
+                   font=dict(size=18, color='#e6e6e6')),
+        height=720,
+        margin=dict(l=0, r=0, t=50, b=0),
+        legend=dict(bgcolor='rgba(20,20,20,0.7)', bordercolor='#444', borderwidth=1),
+    )
+    return fig
 
 # ================================================================
 # 11. STREAMLIT APP
@@ -1194,39 +1555,49 @@ with tabs[12]:
                          hide_index=True, use_container_width=True)
 
 with tabs[13]:
-    st.subheader("🧊 3D Visualization — True-Involute CAD-style Solids")
-    st.caption("Drag to orbit, scroll to zoom, double-click to reset. Full assembly + every component below.")
-    fig_asm = create_assembly_3d(int(zs), int(zp), int(zr), module, N_PLANETS, pin['d_pin'], b, din, dout,
-                                  sun_geom, planet_geom, comp)
+    st.subheader("🧊 3D CAD Visualization")
+    st.caption("Drag to orbit • Scroll to zoom • Right-drag to pan • Double-click to reset")
+
+    explode = st.slider("Explode assembly →", 0.0, 1.0, 0.0, 0.05,
+                        help="0 = fully assembled, 1 = fully exploded along the axis")
+
+    fig_asm = create_assembly_3d(int(zs), int(zp), int(zr), module, N_PLANETS,
+                                  pin['d_pin'], b, din, dout,
+                                  sun_geom, planet_geom, comp, explode=explode)
     st.plotly_chart(fig_asm, use_container_width=True)
 
     st.markdown("### Individual Components")
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    c1, c2, c3 = st.columns(3)
+    with c1:
         st.plotly_chart(create_component_3d_view('Sun Gear', {
-            'z': int(zs), 'm': module, 'face_width': b, 'hub_od': comp['sun']['hub_od'], 'bore_d': comp['sun']['bore_d']
+            'z': int(zs), 'm': module, 'face_width': b,
+            'hub_od': comp['sun']['hub_od'], 'bore_d': comp['sun']['bore_d']
         }), use_container_width=True)
-    with col2:
+    with c2:
         st.plotly_chart(create_component_3d_view('Planet Gear', {
-            'z': int(zp), 'm': module, 'face_width': b, 'hub_od': comp['planet']['hub_od'], 'bore_d': comp['planet']['bore_d']
+            'z': int(zp), 'm': module, 'face_width': b,
+            'hub_od': comp['planet']['hub_od'], 'bore_d': comp['planet']['bore_d']
         }), use_container_width=True)
-    with col3:
+    with c3:
         st.plotly_chart(create_component_3d_view('Ring Gear', {
-            'z': int(zr), 'm': module, 'face_width': b + 2.0, 'outer_d': comp['ring']['outer_d']
+            'z': int(zr), 'm': module, 'face_width': b + 2.0,
+            'outer_d': comp['ring']['outer_d']
         }), use_container_width=True)
 
-    col4, col5, col6 = st.columns(3)
-    with col4:
+    c4, c5, c6 = st.columns(3)
+    with c4:
         st.plotly_chart(create_component_3d_view('Carrier', {
-            'pitch_radius': r_pin_circle, 'd_pin': pin['d_pin'], 'n_planets': N_PLANETS,
-            'plate_thickness': plate_thickness_mm, 'hub_od': comp['carrier']['hub_od'],
+            'pitch_radius': (sun_geom['pitch_d'] + planet_geom['pitch_d']) / 2,
+            'd_pin': pin['d_pin'], 'n_planets': N_PLANETS,
+            'plate_thickness': plate_thickness_mm,
+            'hub_od': comp['carrier']['hub_od'],
             'bore_d': comp['carrier']['output_bore']
         }), use_container_width=True)
-    with col5:
+    with c5:
         st.plotly_chart(create_component_3d_view('Input Shaft', {
             'diameter': din, 'length': comp['input_shaft']['length']
         }), use_container_width=True)
-    with col6:
+    with c6:
         st.plotly_chart(create_component_3d_view('Output Shaft', {
             'diameter': dout, 'length': comp['output_shaft']['length']
         }), use_container_width=True)

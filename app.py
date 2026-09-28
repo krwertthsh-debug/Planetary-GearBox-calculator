@@ -1,6 +1,6 @@
 """
 ================================================================================
- PLANETARY GEARBOX DESIGNER - ULTIMATE EDITION (v5)
+ PLANETARY GEARBOX DESIGNER - EDITION (v5)
 ================================================================================
  Single-stage, 3-planet epicyclic gearbox designer. Best-of-all-versions merge:
 

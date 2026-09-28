@@ -1218,6 +1218,9 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader("Shaft Sizing (ASME combined torsion + bending) & Deflection")
+    st.caption(f"Input: strength {d_in_strength:.2f} mm vs twist {d_in_twist:.2f} mm | "
+           f"Output: strength {d_out_strength:.2f} mm vs twist {d_out_twist:.2f} mm "
+           f"-> larger value used (rounded up to 0.5 mm).")
     st.dataframe(pd.DataFrame([
         [f'Input ({input_member})', T_in_design_Nmm / 1000, Te_in / 1000, d_shaft_in, defl_in['theta_deg'],
          'PASS' if defl_in_ok else 'FAIL'],

@@ -1035,8 +1035,18 @@ T_in_design_Nmm = Tin_design_Nm * 1000.0
 T_out_design_Nmm = design_out_tq * 1000.0
 
 # --- shafts ---
-d_shaft_in, Te_in = shaft_diameter_asme(T_in_design_Nmm, 0.0, mat['tau'], Kb, Kt, Kw)
-d_shaft_out, Te_out = shaft_diameter_asme(T_out_design_Nmm, 0.0, mat['tau'], Kb, Kt, Kw)
+# Strength-based diameters (ASME)
+d_in_strength, Te_in = shaft_diameter_asme(T_in_design_Nmm, 0.0, mat['tau'], Kb, Kt, Kw)
+d_out_strength, Te_out = shaft_diameter_asme(T_out_design_Nmm, 0.0, mat['tau'], Kb, Kt, Kw)
+
+# Stiffness-based diameters (twist <= 0.5 deg)
+TWIST_LIMIT_DEG = 0.5
+d_in_twist = shaft_diameter_for_twist(T_in_design_Nmm, shaft_len_in_mm, mat['E'], mat['nu'], TWIST_LIMIT_DEG)
+d_out_twist = shaft_diameter_for_twist(T_out_design_Nmm, shaft_len_out_mm, mat['E'], mat['nu'], TWIST_LIMIT_DEG)
+
+# Final diameter = larger of the two, rounded UP to the next 0.5 mm
+d_shaft_in = math.ceil(max(d_in_strength, d_in_twist) * 2.0) / 2.0
+d_shaft_out = math.ceil(max(d_out_strength, d_out_twist) * 2.0) / 2.0
 defl_in = torsional_deflection_deg(T_in_design_Nmm, shaft_len_in_mm, mat['E'], mat['nu'], d_shaft_in)
 defl_out = torsional_deflection_deg(T_out_design_Nmm, shaft_len_out_mm, mat['E'], mat['nu'], d_shaft_out)
 defl_in_ok, defl_out_ok = defl_in['theta_deg'] <= 0.5, defl_out['theta_deg'] <= 0.5

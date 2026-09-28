@@ -375,20 +375,18 @@ def design_planet_pin(F_N, span_mm, face_width_mm, sigma_bend, tau_shear, allow_
     return dict(M_max=Mmax, V=V, d_bend=d_bend, d_shear=d_shear, d_pin=d,
                 bearing_pressure=p, pressure_ok=p <= allow_pressure)
 
-
-def torsional_deflection_deg(T_Nmm, L_mm, E_mpa, nu, d_mm):
+ def torsional_deflection_deg(T_Nmm, L_mm, E_mpa, nu, d_mm):
     G = E_mpa / (2.0 * (1.0 + nu))
     J = PI * d_mm ** 4 / 32.0
     return {'G': G, 'J': J, 'theta_deg': math.degrees(T_Nmm * L_mm / (G * J))}
 
 
- def shaft_diameter_for_twist(T_Nmm, L_mm, E_mpa, nu, theta_max_deg=0.5):
-    """Minimum shaft diameter so torsional twist <= theta_max_deg.
-    From theta = T*L/(G*J), J = pi*d^4/32  ->  d = (32*T*L / (pi*G*theta))^(1/4)"""
+def shaft_diameter_for_twist(T_Nmm, L_mm, E_mpa, nu, theta_max_deg=0.5):
+    """Minimum shaft diameter so torsional twist <= theta_max_deg."""
     G = E_mpa / (2.0 * (1.0 + nu))
     theta_rad = math.radians(theta_max_deg)
     return (32.0 * T_Nmm * L_mm / (PI * G * theta_rad)) ** 0.25
-
+ 
 
 def bearing_L10_life(C_dyn, P_eq, n_rpm, bearing_type='Ball'):
     p = 3.0 if bearing_type == 'Ball' else 10.0 / 3.0

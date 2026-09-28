@@ -988,7 +988,7 @@ with st.sidebar:
     key_height_mm = st.number_input("Key height h (mm):", 2.0, 40.0, 6.0, 0.5)
     key_length_mm = st.number_input("Key length l (mm):", 5.0, 150.0, 20.0, 1.0)
 
-       st.header("11. Shaft Lengths & Twist Limit")
+    st.header("11. Shaft Lengths & Twist Limit")
     shaft_len_in_mm = st.number_input("Input shaft length (mm):", 10.0, 500.0, 60.0, 5.0)
     shaft_len_out_mm = st.number_input("Output shaft length (mm):", 10.0, 500.0, 60.0, 5.0)
     twist_limit_deg = st.number_input("Max allowed shaft twist (deg):", 0.05, 5.0, 0.5, 0.05,

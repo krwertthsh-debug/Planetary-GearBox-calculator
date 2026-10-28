@@ -1,6 +1,6 @@
 """
 ================================================================================
- PLANETARY GEARBOX DESIGNER  -  v6  (single file: designer + true tooth profile)
+ PLANETARY GEARBOX DESIGNER  -  v8  (single file: designer + true tooth profile + export + VEHICLE)
 ================================================================================
  Single-stage, 3-planet epicyclic gearbox designer.
 
@@ -9,7 +9,7 @@
    - Kinematics for Ring-Fixed, Sun-Fixed or Carrier-Fixed
    - ISO 6336-lite stress engine, ASME shafts + twist, planet pin, bearings L10,
      carrier, ring rim, keys, component dimensions, PASS/FAIL dashboard
-   - NEW  TRUE TOOTH PROFILE ENGINE (class GearProfile, section 10):
+   - TRUE TOOTH PROFILE ENGINE (class GearProfile, section 10):
         * exact involute flanks from the base circle
         * trochoidal root fillet (rack-cutter generated) with root fillet radius
         * addendum / dedendum / clearance coefficients
@@ -17,24 +17,43 @@
         * tip relief + root relief (start point + max depth + ramp exponent)
         * lead crowning (drum) on external gears
         * exact planet/ring phasing so the teeth really mesh
-   - NEW  Fusion 360 "Spur Gear" input table (Standard, Pressure Angle, Module,
-          Number of Teeth, Backlash, Root Fillet Radius, Gear Thickness,
-          Hole Diameter, Pitch Diameter) for Sun / Planet / Ring
+   - Fusion 360 "Spur Gear" input table for Sun / Planet / Ring
    - Plotly 3D and OpenSCAD export both use the REAL profile points
+   - v7: OpenSCAD "print_plate" view + Export tab (every tab as .txt, ZIP of .scad files)
+   - NEW in v8  (merged from the "9:1 Planetary Gearbox on Maruti 800" calculation doc):
+        * Sidebar section 15 "Vehicle / Tire / Differential"
+        * Tab 17 "Vehicle Performance":
+             - tire & wheel dimensions from the tire code (e.g. 145/70 R12):
+               sidewall, rim radius, rim circumference, overall diameter, rolling circumference
+             - wheel rpm and km/h for the gearbox ALONE (no differential) and for
+               gearbox + differential (final drive)
+             - speed vs motor rpm, torque / tractive force / power tables
+             - target speed (default 60 km/h): wheel rpm, motor rpm, road load, power, torque needed
+             - can it hold the target speed? surplus force, acceleration left
+             - low-speed gradeability and flat-road top speed
+             - Plotly charts: speed vs motor rpm, tractive force vs road load
+        * The vehicle tables are also written to the Export tab (now tab 18)
+        * Defaults changed to match the vehicle study: mesh efficiency 0.95, max input speed 8000 rpm
 
- Run with:   streamlit run planetary_gearbox_designer_v6.py
+ Run with:   streamlit run planetary_gearbox_designer_v8.py
  Requires :  streamlit, numpy, pandas, plotly   (optional: shapely for the mesh check)
 
  ENGINEERING NOTE
  First-pass sizing aid (ISO 6336-lite, ASME shaft code, AGMA-style rim factor,
  Lundberg-Palmgren life). The tooth-profile geometry is exact for spur gears with
- profile shift x = 0; the strength numbers are simplified. Validate a prototype
- physically before relying on it. Printed plastics need plastic material data.
+ profile shift x = 0; the strength numbers are simplified. The vehicle numbers are
+ ideal (no tire slip, constant motor torque) and use assumed mass / Crr / Cd / area
+ and an assumed differential ratio - replace them with your own values.
+ Validate a prototype physically before relying on it. Printed plastics need
+ plastic material data.
 ================================================================================
 """
 
+import io
 import math
 import json
+import zipfile
+import datetime
 from dataclasses import dataclass, asdict
 import numpy as np
 import pandas as pd
@@ -48,7 +67,7 @@ PI = math.pi
 TARGET_RATIO_DEFAULT   = 9.0
 MAX_OD_DEFAULT_MM       = 200.0
 N_PLANETS               = 3           # fixed 3-planet configuration
-EFFICIENCY_DEFAULT      = 0.97
+EFFICIENCY_DEFAULT      = 0.95        # v8: 0.95 (matches the vehicle study); v7 used 0.97
 PRESSURE_ANGLE_DEFAULT  = 20.0
 HELIX_ANGLE_DEFAULT     = 0.0
 MODULE_LIST             = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0]
@@ -56,6 +75,7 @@ DESIGN_TQ_MIN, DESIGN_TQ_MAX = 65.0, 75.0
 FACE_WIDTH_FACTOR_DEFAULT = 16.0
 RATED_T_IN_NM_MIN  = 1.0
 RATED_N_IN_RPM_MIN = 100.0
+MAX_INPUT_RPM_DEFAULT = 8000.0        # v8: lets the sliders reach the 5,600-6,000 rpm vehicle motor speed
 
 MATERIALS = {
     '17CrNiMo6 / 18CrNiMo7-6 (Case Carburized)': {
@@ -154,6 +174,17 @@ PARAM_GLOSSARY = {
         ("rim_thickness", "Radial wall behind the teeth", "mm", "computed", "Governs ring rim strength."),
         ("housing", "Envelope casing around the ring gear", "mm", "computed", "OD, wall, length, flange, base thickness."),
     ],
+    "Vehicle & Differential (new in v8)": [
+        ("Tire code w/a R d", "Width (mm) / aspect ratio (%) / rim (in)", "-", "145/70 R12", "Sidewall = width x aspect; overall dia = rim dia + 2 x sidewall."),
+        ("C_roll", "Tire rolling circumference = pi x overall dia", "m", "computed", "Distance travelled per wheel revolution."),
+        ("Wheel rpm", "Motor rpm / overall ratio", "rpm", "computed", "Overall ratio = gearbox ratio (x final drive when a differential is used)."),
+        ("v (km/h)", "wheel rpm x C_roll x 60 / 1000", "km/h", "computed", "Ideal speed, no tire slip."),
+        ("Final drive", "Differential reduction ratio", "-", "4.388 (Maruti 800, verify)", "Multiplies torque and divides speed again after the gearbox."),
+        ("F_tractive", "Wheel torque / tire radius", "N", "computed", "Wheel torque = T_motor x ratio x efficiency."),
+        ("Road load", "Rolling resistance + air drag (+ grade)", "N", "Crr 0.015, Cd 0.4, A 1.8 m2", "Rolling = Crr m g; drag = 0.5 rho Cd A v^2."),
+        ("Surplus force", "F_tractive - road load", "N", "computed", "Acceleration left = surplus / mass."),
+        ("Gradeability", "Maximum slope at low speed", "%", "computed", "Solves F = m g (Crr cos + sin) for the slope angle."),
+    ],
 }
 
 
@@ -232,7 +263,7 @@ def suggest_tooth_sets(fixed_case, target_ratio, n_planets, max_od, modules=MODU
 
 
 # ================================================================
-# 3. GEAR GEOMETRY  (now driven by addendum / dedendum coefficients)
+# 3. GEAR GEOMETRY  (driven by addendum / dedendum coefficients)
 # ================================================================
 def gear_geometry(S, P, R, m, alpha_n_deg, beta_deg=0.0, ha_star=1.0, hf_star=1.25):
     alpha_n = math.radians(alpha_n_deg)
@@ -349,7 +380,7 @@ def life_factor(N_cycles, kind='contact'):
 
 
 # ================================================================
-# 6. MESH FORCES + STRESS (ISO 6336-lite)   -- force model CORRECTED in v6
+# 6. MESH FORCES + STRESS (ISO 6336-lite)
 # ================================================================
 def planetary_gear_stress(params):
     S, P, R = params['S'], params['P'], params['R']
@@ -366,8 +397,8 @@ def planetary_gear_stress(params):
     rS = S * m / (2 * math.cos(beta_r)); rP = P * m / (2 * math.cos(beta_r))
     dS, dP = 2 * rS, 2 * rP
 
-    # v6 FIX: tangential force at the PITCH circle; the planet is a lever, so the ring-mesh
-    # force equals the sun-mesh force (v5 divided it by R/S and used the base circle).
+    # tangential force at the PITCH circle; the planet is a lever, so the ring-mesh
+    # force equals the sun-mesh force
     Ft_sp = (TS / (n_planets * rS)) * Kp
     Ft_rp = Ft_sp
     Fn_sp, Fn_rp = Ft_sp / math.cos(alpha_t), Ft_rp / math.cos(alpha_t)
@@ -542,7 +573,7 @@ def component_dimensions(m, b, d_sun, d_planet, d_ring, d_in_shaft, d_out_shaft,
 
 
 # ================================================================
-# 10. TRUE TOOTH PROFILE ENGINE  (NEW in v6)
+# 10. TRUE TOOTH PROFILE ENGINE
 #     involute flank + trochoidal root fillet + backlash + relief + crowning
 #     + assembly phasing + Plotly meshes + OpenSCAD export
 # ================================================================
@@ -876,7 +907,7 @@ def _circle(r, n=96, off=0.0):
 
 
 # ================================================================
-# [5] PLOTLY 3D  (uses the real profile; replaces the old approximated teeth)
+# [5] PLOTLY 3D  (uses the real profile)
 # ================================================================
 def _ring_between(outer, inner, z0, z1):
     """Solid between two equally-sampled closed polylines (matched by polar angle)."""
@@ -992,7 +1023,7 @@ def create_gear_3d(kind, S, P, R, m, pp, b, bore_d=None, outer_d=None, quality=1
 
 
 # ================================================================
-# [6] OPENSCAD EXPORT  (real profile points, correct phasing, crowning)
+# [6] OPENSCAD EXPORT  (real profile points, correct phasing, crowning, PRINT PLATE)
 # ================================================================
 def _scad_pts(arr):
     return "[" + ",".join(f"[{x:.4f},{y:.4f}]" for x, y in arr) + "]"
@@ -1005,9 +1036,13 @@ def generate_openscad(S, P, R, m, N, pp: ProfileParams, d_pin, b, sun_bore, plan
     planet_rot, ring_rot, perr = planetary_phases(S, P, R, N)
     pr_deg = ",".join(f"{math.degrees(a):.6f}" for a in planet_rot)
     hub_len = max(1.5 * dout, 10.0)
+    # sizes used by the print plate layout
+    sun_tip_d = 2 * prof['sun'].r_tip
+    planet_tip_d = 2 * prof['planet'].r_tip
+    carrier_r = pitch_r + 1.5 * d_pin
     return f"""// =====================================================================
 // PLANETARY GEARBOX - OPENSCAD MODEL (true involute + trochoidal root fillet)
-// Generated by Planetary Gearbox Designer v6  |  units: mm
+// Generated by Planetary Gearbox Designer v8  |  units: mm
 // S={S} P={P} R={R} m={m}  ratio(ring fixed) = {(S + R) / S:.4f}  planets={N}
 // alpha={pp.alpha_n_deg} deg  ha*={pp.ha_star}  c*={pp.c_star}  rf={prof['sun'].rho:.3f} mm
 // backlash j_t={pp.backlash_mm} mm  tip relief={pp.tip_relief_depth_mm} mm  root relief={pp.root_relief_depth_mm} mm
@@ -1015,9 +1050,12 @@ def generate_openscad(S, P, R, m, N, pp: ProfileParams, d_pin, b, sun_bore, plan
 //
 // SCOPE: gear set + carrier + shafts + pins. NOT modelled: keyways, bearing seats,
 // retaining rings, ring-gear fastening, real housing. Set SHOW to a single part
-// and export STL for printing (one part per file, print gears flat on the bed).
+// and export STL for printing (one part per file, print gears flat on the bed),
+// or use SHOW = "print_plate" for every printable part laid flat in one file.
+// Shafts are NOT on the print plate: use steel rod (printed shafts twist far more
+// than the shaft checks in the app assume).
 // =====================================================================
-SHOW = "{show}";     // assembly | exploded | sun | planet | ring | carrier | input_shaft | output_shaft | planet_pin | housing
+SHOW = "{show}";     // print_plate | assembly | exploded | sun | planet | ring | carrier | input_shaft | output_shaft | planet_pin | housing
 
 n_planets = {N};
 zs = {S}; zp = {P}; zr = {R};
@@ -1105,7 +1143,31 @@ module assembly(ex = 0) {{
     color("DimGray") translate([0, 0, b + axial_gap + 3*g]) output_shaft();
 }}
 
-if      (SHOW == "assembly")     assembly(0);
+// =====================================================================
+// PRINT PLATE: every printable part flat on the bed (no shafts)
+// The {N} planets are identical parts; the assembly condition guarantees they all
+// mesh at the same tooth phase, so just fit each one onto its pin.
+// =====================================================================
+module print_plate() {{
+    gap    = 8;
+    ring_r = {ring_outer_d:.3f}/2;
+    car_r  = {carrier_r:.3f};
+    sun_r  = {sun_tip_d:.3f}/2;
+    pl_r   = {planet_tip_d:.3f}/2;
+    row_y  = -(ring_r + max(sun_r, pl_r) + gap);
+
+    translate([0, 0, 1]) ring_gear_part();                       // ring (its body starts at z=-1)
+    translate([ring_r + car_r + gap, 0, 0]) carrier();           // carrier, hub up
+    translate([0, row_y, 0]) sun_gear();
+    for (i = [0 : n_planets-1])                                  // identical planets
+        translate([sun_r + gap + pl_r + i*(2*pl_r + gap), row_y, 0]) planet_gear();
+    for (i = [0 : n_planets-1])                                  // pins lie on their side
+        translate([0, row_y - max(sun_r, pl_r) - gap - 8 - i*(d_pin + gap), d_pin/2])
+            rotate([0, 90, 0]) planet_pin_part();
+}}
+
+if      (SHOW == "print_plate")  print_plate();
+else if (SHOW == "assembly")     assembly(0);
 else if (SHOW == "exploded")     assembly(0.6);
 else if (SHOW == "sun")          sun_gear();
 else if (SHOW == "planet")       planet_gear();
@@ -1162,6 +1224,246 @@ def fusion_spur_gear_table(profiles, pp, m, alpha_n, face_width, comp):
 
 
 # ================================================================
+# 11B. VEHICLE PERFORMANCE  (NEW in v8)
+#      tire code -> rolling circumference -> wheel rpm -> km/h
+#      gearbox ALONE vs gearbox + DIFFERENTIAL (final drive)
+# ================================================================
+G_ACC = 9.81
+
+
+def tire_geometry(width_mm, aspect_pct, rim_in):
+    """Dimensions from a tire code such as 145/70 R12."""
+    sidewall = width_mm * aspect_pct / 100.0
+    rim_d = rim_in * 25.4
+    od = rim_d + 2.0 * sidewall
+    return {'width_mm': width_mm, 'aspect_pct': aspect_pct, 'sidewall_mm': sidewall,
+            'rim_d_mm': rim_d, 'rim_r_mm': rim_d / 2.0, 'rim_circ_m': PI * rim_d / 1000.0,
+            'od_mm': od, 'r_tire_mm': od / 2.0, 'circ_m': PI * od / 1000.0}
+
+
+def wheel_rpm_to_kmh(wheel_rpm, circ_m):
+    return wheel_rpm * circ_m * 60.0 / 1000.0
+
+
+def kmh_to_wheel_rpm(v_kmh, circ_m):
+    return v_kmh * 1000.0 / 60.0 / circ_m
+
+
+def road_load(v_kmh, mass_kg, crr, cd, area_m2, rho=1.2, grade_pct=0.0):
+    """Rolling + aerodynamic (+ grade) resistance in N at speed v_kmh."""
+    v = v_kmh / 3.6
+    th = math.atan(grade_pct / 100.0)
+    f_roll = crr * mass_kg * G_ACC * math.cos(th)
+    f_aero = 0.5 * rho * cd * area_m2 * v * v
+    f_grade = mass_kg * G_ACC * math.sin(th)
+    return {'rolling': f_roll, 'aero': f_aero, 'grade': f_grade, 'total': f_roll + f_aero + f_grade}
+
+
+def max_grade_pct(force_N, mass_kg, crr):
+    """Steepest slope (%) the tractive force can climb at low speed (rolling resistance only)."""
+    if force_N <= 0:
+        return 0.0
+    x = force_N / (mass_kg * G_ACC * math.sqrt(1.0 + crr ** 2))
+    if x >= 1.0:
+        return float('inf')
+    theta = math.asin(x) - math.atan(crr)
+    return max(math.tan(theta), 0.0) * 100.0 if theta > 0 else 0.0
+
+
+def top_speed_kmh(force_N, v_rpm_limit_kmh, mass_kg, crr, cd, area_m2, rho=1.2):
+    """Flat-road top speed for a constant tractive force, capped by the motor rpm limit."""
+    f_roll = crr * mass_kg * G_ACC
+    k = 0.5 * rho * cd * area_m2
+    if force_N <= f_roll:
+        return 0.0, 'force below rolling resistance'
+    v_aero = math.sqrt((force_N - f_roll) / k) * 3.6 if k > 0 else float('inf')
+    if v_aero <= v_rpm_limit_kmh:
+        return v_aero, 'force / road load'
+    return v_rpm_limit_kmh, 'motor rpm limit'
+
+
+def _parse_floats(txt, default):
+    """'5, 6.5; 8' -> [5.0, 6.5, 8.0]; falls back to `default` on bad input."""
+    try:
+        vals = [float(x) for x in str(txt).replace(';', ',').split(',') if x.strip()]
+        return vals or list(default)
+    except ValueError:
+        return list(default)
+
+
+def vehicle_analysis(ratio_gb, eff_gb, final_drive, eff_diff, tire, mass, crr, cd, area, rho,
+                     target_kmh, n_base_rpm, torques, rpm_points, rpm_limit):
+    """
+    Two drivetrain cases, same tire:
+      'Without differential' : gearbox output drives the wheel directly   (ratio = i)
+      'With differential'    : gearbox + final drive                      (ratio = i x final drive)
+    Returns the result tables (title, DataFrame list) plus the scalars the tab needs.
+    """
+    circ = tire['circ_m']
+    rt = tire['r_tire_mm'] / 1000.0
+    cases = {'Without differential': (ratio_gb, eff_gb),
+             'With differential': (ratio_gb * final_drive, eff_gb * eff_diff)}
+    short = {'Without differential': 'No diff', 'With differential': 'With diff'}
+    v_t = target_kmh / 3.6
+    wr_t = kmh_to_wheel_rpm(target_kmh, circ)
+    rl_t = road_load(target_kmh, mass, crr, cd, area, rho)
+    p_wheel_t = rl_t['total'] * v_t
+
+    # ---- 1. tire & wheel ----
+    tire_df = pd.DataFrame([
+        ['Tire width', f"{tire['width_mm']:.0f} mm", 'given'],
+        ['Aspect ratio', f"{tire['aspect_pct']:.0f} %", 'given'],
+        ['Sidewall height', f"{tire['sidewall_mm']:.1f} mm", 'width x aspect ratio'],
+        ['Rim diameter', f"{tire['rim_d_mm']:.1f} mm", 'rim inch x 25.4'],
+        ['Wheel rim radius', f"{tire['rim_r_mm']:.1f} mm", 'rim diameter / 2'],
+        ['Rim circumference', f"{tire['rim_circ_m']:.3f} m", 'pi x rim diameter'],
+        ['Overall tire diameter', f"{tire['od_mm']:.1f} mm", 'rim diameter + 2 x sidewall'],
+        ['Tire radius', f"{tire['r_tire_mm']:.1f} mm", 'overall diameter / 2'],
+        ['Tire rolling circumference', f"{tire['circ_m']:.3f} m", 'pi x overall diameter = distance per wheel rev'],
+    ], columns=['Item', 'Value', 'Calculation'])
+
+    # ---- 2. ratios & speed at the base input rpm ----
+    speed_base, wheel_rpm_base = {}, {}
+    ratio_rows = []
+    for nm, (rat, eff) in cases.items():
+        w = n_base_rpm / rat
+        wheel_rpm_base[nm] = w
+        speed_base[nm] = wheel_rpm_to_kmh(w, circ)
+        ratio_rows.append([nm, f"{rat:.3f}", f"{eff * 100:.1f} %", f"{n_base_rpm:.0f}",
+                           f"{w:.1f}", f"{speed_base[nm]:.2f}"])
+    ratio_df = pd.DataFrame(ratio_rows, columns=['Case', 'Overall ratio', 'Overall efficiency',
+                                                  'Motor rpm', 'Wheel rpm', 'Speed (km/h)'])
+
+    # ---- 3. speed vs motor rpm ----
+    rpms = sorted(set(float(x) for x in rpm_points) | {float(n_base_rpm)})
+    srows = []
+    for n in rpms:
+        row = {'Motor rpm': f"{n:.0f}"}
+        for nm, (rat, eff) in cases.items():
+            w = n / rat
+            row[f'{short[nm]} wheel rpm'] = f"{w:.1f}"
+            row[f'{short[nm]} km/h'] = f"{wheel_rpm_to_kmh(w, circ):.2f}"
+        srows.append(row)
+    speed_df = pd.DataFrame(srows)
+
+    # ---- 4. torque / power / tractive force at the base input rpm ----
+    omega_b = 2 * PI * n_base_rpm / 60.0
+    trows = []
+    for T in torques:
+        row = {'Motor torque (N.m)': f"{T:g}", 'Motor power (kW)': f"{T * omega_b / 1000.0:.3f}"}
+        for nm, (rat, eff) in cases.items():
+            Tw = T * rat * eff
+            row[f'{short[nm]} wheel torque (N.m)'] = f"{Tw:.1f}"
+            row[f'{short[nm]} tractive force (N)'] = f"{Tw / rt:.0f}"
+        trows.append(row)
+    torque_df = pd.DataFrame(trows)
+
+    # ---- 5. what the target speed demands ----
+    tgt_rows, n_need = [], {}
+    for nm, (rat, eff) in cases.items():
+        n_need[nm] = wr_t * rat
+        p_mot = p_wheel_t / eff
+        t_req = p_mot / (2 * PI * n_need[nm] / 60.0) if n_need[nm] > 0 else float('nan')
+        gb_ratio_needed = (n_base_rpm / wr_t) / (1.0 if nm == 'Without differential' else final_drive)
+        tgt_rows.append([nm, f"{rat:.3f}", f"{wr_t:.1f}", f"{n_need[nm]:,.0f}",
+                         'OK' if n_need[nm] <= rpm_limit else f"TOO HIGH (limit {rpm_limit:,.0f})",
+                         f"{rl_t['total']:.0f}", f"{p_wheel_t / 1000.0:.2f}", f"{p_mot / 1000.0:.2f}",
+                         f"{t_req:.2f}", f"{gb_ratio_needed:.3f}"])
+    target_df = pd.DataFrame(tgt_rows, columns=[
+        'Case', 'Overall ratio', 'Wheel rpm needed', 'Motor rpm needed', 'Motor rpm vs limit',
+        'Road load (N)', 'Wheel power (kW)', 'Motor power needed (kW)', 'Motor torque needed (N.m)',
+        f'Gearbox ratio needed @ {n_base_rpm:.0f} rpm'])
+
+    # ---- 6. can it hold the target speed? ----
+    hold_rows = []
+    for nm, (rat, eff) in cases.items():
+        for T in torques:
+            F = T * rat * eff / rt
+            net = F - rl_t['total']
+            acc = net / mass
+            if n_need[nm] > rpm_limit:
+                status = 'motor rpm too high'
+            elif net < 0:
+                status = 'cannot hold'
+            elif acc < 0.05:
+                status = 'just holds (no margin)'
+            else:
+                status = 'holds'
+            hold_rows.append([nm, f"{T:g}", f"{n_need[nm]:,.0f}", f"{T * 2 * PI * n_need[nm] / 60.0 / 1000.0:.2f}",
+                              f"{F:.0f}", f"{rl_t['total']:.0f}", f"{net:.0f}", f"{acc:.2f}", status])
+    hold_df = pd.DataFrame(hold_rows, columns=[
+        'Case', 'Motor torque (N.m)', 'Motor rpm at target', 'Motor power (kW)', 'Tractive force (N)',
+        'Road load (N)', 'Surplus force (N)', 'Acceleration left (m/s2)', 'Status'])
+
+    # ---- 7. gradeability (low speed) ----
+    grows = []
+    for T in torques:
+        row = {'Motor torque (N.m)': f"{T:g}"}
+        for nm, (rat, eff) in cases.items():
+            g = max_grade_pct(T * rat * eff / rt, mass, crr)
+            row[f'{short[nm]} max grade (%)'] = 'steeper than 100' if math.isinf(g) else f"{g:.1f}"
+        grows.append(row)
+    grade_df = pd.DataFrame(grows)
+
+    # ---- 8. flat-road top speed ----
+    toprows = []
+    for T in torques:
+        row = {'Motor torque (N.m)': f"{T:g}"}
+        for nm, (rat, eff) in cases.items():
+            F = T * rat * eff / rt
+            v_lim = wheel_rpm_to_kmh(rpm_limit / rat, circ)
+            v, why = top_speed_kmh(F, v_lim, mass, crr, cd, area, rho)
+            row[f'{short[nm]} top speed (km/h)'] = f"{v:.1f}"
+            row[f'{short[nm]} limited by'] = why
+        toprows.append(row)
+    top_df = pd.DataFrame(toprows)
+
+    tables = [
+        ("Tire and wheel dimensions", tire_df),
+        (f"Ratios and speed at {n_base_rpm:.0f} rpm motor speed", ratio_df),
+        ("Speed versus motor rpm", speed_df),
+        (f"Torque, power and tractive force at {n_base_rpm:.0f} rpm", torque_df),
+        (f"What {target_kmh:g} km/h demands from each drivetrain", target_df),
+        (f"Can it hold {target_kmh:g} km/h on a flat road?", hold_df),
+        ("Low-speed gradeability (rolling resistance only)", grade_df),
+        ("Flat-road top speed (constant motor torque, capped by the motor rpm limit)", top_df),
+    ]
+    return {'tire': tire, 'cases': cases, 'circ': circ, 'rt': rt, 'wr_target': wr_t,
+            'road_target': rl_t, 'p_wheel_target': p_wheel_t, 'speed_base': speed_base,
+            'wheel_rpm_base': wheel_rpm_base, 'n_need': n_need, 'tables': tables}
+
+
+def fig_speed_vs_rpm(cases, circ, rpm_max, target_kmh):
+    import plotly.graph_objects as go
+    rpms = np.linspace(0.0, rpm_max, 80)
+    fig = go.Figure()
+    for nm, (rat, eff) in cases.items():
+        fig.add_trace(go.Scatter(x=rpms, y=[wheel_rpm_to_kmh(r / rat, circ) for r in rpms],
+                                 mode='lines', name=nm))
+    fig.add_hline(y=target_kmh, line_dash='dash', annotation_text=f"target {target_kmh:g} km/h")
+    fig.update_layout(title="Vehicle speed vs motor rpm", xaxis_title="Motor rpm", yaxis_title="Speed (km/h)",
+                      height=380, margin=dict(l=10, r=10, t=45, b=10), legend=dict(orientation='h'))
+    return fig
+
+
+def fig_force_vs_speed(cases, circ, rt, motor_tq, rpm_limit, mass, crr, cd, area, rho):
+    import plotly.graph_objects as go
+    vmax = max(wheel_rpm_to_kmh(rpm_limit / rat, circ) for rat, _ in cases.values())
+    vs = np.linspace(0.0, max(vmax, 10.0), 80)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=vs, y=[road_load(v, mass, crr, cd, area, rho)['total'] for v in vs],
+                             mode='lines', name='Road load (flat)', line=dict(dash='dash', color='#888')))
+    for nm, (rat, eff) in cases.items():
+        F = motor_tq * rat * eff / rt
+        vcase = wheel_rpm_to_kmh(rpm_limit / rat, circ)
+        fig.add_trace(go.Scatter(x=[0.0, vcase], y=[F, F], mode='lines', name=f"{nm} tractive force"))
+    fig.update_layout(title=f"Tractive force vs road load at {motor_tq:g} N.m motor torque (constant torque)",
+                      xaxis_title="Speed (km/h)", yaxis_title="Force (N)", height=380,
+                      margin=dict(l=10, r=10, t=45, b=10), legend=dict(orientation='h'))
+    return fig
+
+
+# ================================================================
 # 12. STREAMLIT APP
 # ================================================================
 st.set_page_config(page_title="Planetary Gearbox Designer", page_icon="⚙️", layout="wide",
@@ -1171,9 +1473,10 @@ st.markdown("""
 .main-header{font-size:2.0rem;font-weight:800;color:#1f4e78;text-align:center;margin-bottom:.2rem;}
 .sub-header{font-size:.9rem;color:#666;text-align:center;margin-bottom:1rem;}
 </style>""", unsafe_allow_html=True)
-st.markdown('<div class="main-header">⚙️ Planetary Gearbox Designer — v6</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">⚙️ Planetary Gearbox Designer — v8</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">3-planet single-stage epicyclic gearbox — true involute + trochoidal fillet '
-            'tooth profile, stress, deflection, bearing-life, 3D CAD, Fusion 360 inputs & OpenSCAD</div>',
+            'tooth profile, stress, deflection, bearing-life, 3D CAD, Fusion 360 inputs, OpenSCAD print files, '
+            'vehicle speed / torque study (with and without differential) & text export</div>',
             unsafe_allow_html=True)
 
 with st.sidebar:
@@ -1196,7 +1499,9 @@ with st.sidebar:
     st.header("3. Operating Conditions")
     t_in_max = st.number_input("Max Input Torque available (N·m):", RATED_T_IN_NM_MIN, 500.0, 20.0, 0.5)
     t_in_nm = st.slider("Input Torque (N·m):", RATED_T_IN_NM_MIN, t_in_max, 5.0, 0.1)
-    n_in_max = st.number_input("Max Input Speed available (rpm):", RATED_N_IN_RPM_MIN, 20000.0, 3000.0, 50.0)
+    n_in_max = st.number_input("Max Input Speed available (rpm):", RATED_N_IN_RPM_MIN, 20000.0,
+                               MAX_INPUT_RPM_DEFAULT, 50.0,
+                               help="Also used as the motor rpm limit in the Vehicle Performance tab.")
     n_in_rpm = st.slider("Input Speed (rpm):", RATED_N_IN_RPM_MIN, n_in_max, 1500.0, 10.0)
     st.caption("Motor power is always a **computed result**, never a direct input.")
 
@@ -1291,6 +1596,25 @@ with st.sidebar:
     axial_gap_mm = st.number_input("Axial running gap (mm):", 0.2, 2.0, 0.6, 0.1)
     nozzle_mm = st.number_input("Nozzle diameter (mm):", 0.2, 1.0, 0.4, 0.1)
 
+    st.header("15. Vehicle / Tire / Differential  (new in v8)")
+    st.caption("Used by tab 17. Gearbox ratio and mesh efficiency come from sections 1-2; "
+               "motor speed limit from section 3.")
+    tire_w = st.number_input("Tire width (mm):", 100.0, 400.0, 145.0, 5.0)
+    tire_ar = st.number_input("Tire aspect ratio (%):", 20.0, 90.0, 70.0, 5.0)
+    rim_in = st.number_input("Rim diameter (in):", 8.0, 24.0, 12.0, 1.0)
+    final_drive = st.number_input("Differential / final drive ratio:", 1.0, 10.0, 4.388, 0.001, format="%.3f",
+                                  help="4.388 is the Maruti 800 figure as far as I know - verify for your vehicle.")
+    eff_diff = st.number_input("Differential efficiency:", 0.80, 1.00, 0.97, 0.01)
+    veh_mass = st.number_input("Vehicle mass incl. load (kg):", 50.0, 5000.0, 800.0, 10.0)
+    crr = st.number_input("Rolling resistance coeff. Crr:", 0.005, 0.050, 0.015, 0.001, format="%.3f")
+    cd_drag = st.number_input("Drag coeff. Cd:", 0.10, 1.50, 0.40, 0.01)
+    frontal_area = st.number_input("Frontal area (m²):", 0.3, 5.0, 1.8, 0.1)
+    air_rho = st.number_input("Air density (kg/m³):", 0.9, 1.4, 1.2, 0.05)
+    target_kmh = st.number_input("Target speed (km/h):", 5.0, 200.0, 60.0, 5.0)
+    veh_torques_txt = st.text_input("Motor torques to evaluate (N·m, comma separated):", "5, 6.5, 8, 10, 12")
+    veh_rpm_txt = st.text_input("Motor speeds to tabulate (rpm, comma separated):",
+                                "1500, 3000, 4000, 5000, 5600, 6000")
+
 # ================================================================
 # CALCULATIONS
 # ================================================================
@@ -1346,7 +1670,7 @@ T_out_design_Nmm = design_out_tq * 1000.0
 d_in_strength, Te_in = shaft_diameter_asme(T_in_design_Nmm, 0.0, mat['tau'], Kb, Kt, Kw)
 d_out_strength, Te_out = shaft_diameter_asme(T_out_design_Nmm, 0.0, mat['tau'], Kb, Kt, Kw)
 
-# Stiffness-based diameters use the sidebar twist limit (v5 hard-coded 0.5 deg)
+# Stiffness-based diameters use the sidebar twist limit
 TWIST_LIMIT_DEG = twist_limit_deg
 d_in_twist = shaft_diameter_for_twist(T_in_design_Nmm, shaft_len_in_mm, mat['E'], mat['nu'], TWIST_LIMIT_DEG)
 d_out_twist = shaft_diameter_for_twist(T_out_design_Nmm, shaft_len_out_mm, mat['E'], mat['nu'], TWIST_LIMIT_DEG)
@@ -1424,13 +1748,20 @@ key_in_res = key_sizing(T_in_design_Nmm, d_shaft_in, key_width_mm, key_height_mm
 key_out_res = key_sizing(T_out_design_Nmm, d_shaft_out, key_width_mm, key_height_mm, key_length_mm, mat['tau'],
                           mat['sigma_allow_bearing'])
 
-# --- component dims (real print fits instead of the v5 2 mm slop) ---
+# --- component dims (real print fits) ---
 comp = component_dimensions(m_use, face_width, d_sun, d_planet, d_ring, d_shaft_in, d_shaft_out,
                              pin['d_pin'], max_od, pin_span_mm, N_PLANETS, ha_star, hf_star)
 comp['Carrier Plate']['plate_thickness'] = plate_thickness_mm
 comp['Sun Gear']['bore_d'] = d_shaft_in + fit_clearance_mm
 comp['Planet Gear']['bore_d'] = pin['d_pin'] + fit_clearance_mm
 print_rows = print_readiness(profiles, comp['Sun Gear']['bore_d'], m_use, nozzle_mm)
+
+# --- vehicle performance (tire -> wheel -> km/h, with / without differential) ---
+tire = tire_geometry(tire_w, tire_ar, rim_in)
+veh_torques = _parse_floats(veh_torques_txt, [5.0, 6.5, 8.0, 10.0, 12.0])
+veh_rpms = _parse_floats(veh_rpm_txt, [1500.0, 3000.0, 4000.0, 5000.0, 5600.0, 6000.0])
+veh = vehicle_analysis(ratio_actual, efficiency, final_drive, eff_diff, tire, veh_mass, crr, cd_drag,
+                       frontal_area, air_rho, target_kmh, n_in_rpm, veh_torques, veh_rpms, n_in_max)
 
 # --- overall checks ---
 overall_checks = {
@@ -1480,7 +1811,8 @@ tabs = st.tabs([
     "1 · Gear Geometry", "2 · Tooth Synthesis", "3 · Kinematics", "4 · Shafts & Pins", "5 · Bearings",
     "6 · Planet Load Sharing", "7 · Planet Pin", "8 · Carrier", "9 · Ring Rim", "10 · Keys/Splines",
     "11 · Component Dimensions", "12 · Overall Design Results", "13 · Parameter Glossary",
-    "14 · 3D Visualization", "15 · OpenSCAD", "16 · Fusion 360 Inputs",
+    "14 · 3D Visualization", "15 · OpenSCAD", "16 · Fusion 360 Inputs", "17 · Vehicle Performance",
+    "18 · Export",
 ])
 
 with tabs[0]:
@@ -1686,6 +2018,9 @@ with tabs[11]:
         ['Gear contact SF (min)', f"{min(sfH_sp, sfH_rp):.2f}", ">=1 required"],
         ['Main bearing L10', f"{main_bearing_life['L10_h']:.0f} h", "—"],
         ['Planet bearing L10', f"{planet_bearing_life['L10_h']:.0f} h" if planet_bearing_life else "n/a", "—"],
+        [f'Vehicle speed @ {n_in_rpm:.0f} rpm (no diff)', f"{veh['speed_base']['Without differential']:.2f} km/h", "tab 17"],
+        [f'Vehicle speed @ {n_in_rpm:.0f} rpm (with diff)', f"{veh['speed_base']['With differential']:.2f} km/h", "tab 17"],
+        [f'Motor rpm for {target_kmh:g} km/h (no diff)', f"{veh['n_need']['Without differential']:,.0f} rpm", "tab 17"],
     ], columns=['Metric', 'Value', 'Notes'])
     st.dataframe(kpi, hide_index=True, use_container_width=True)
 
@@ -1718,6 +2053,11 @@ Carrier arm SF:   {carrier_arm_res['sf']:.2f}
 Carrier plate SF: {carrier_plate_res['sf']:.2f}
 Ring rim SF:      {ring_rim_res['sf']:.2f}
 Main bearing L10: {main_bearing_life['L10_h']:.0f} h
+
+Vehicle (tire {tire_w:g}/{tire_ar:g} R{rim_in:g}, rolling circumference {tire['circ_m']:.3f} m):
+  Speed @ {n_in_rpm:.0f} rpm, no differential:   {veh['speed_base']['Without differential']:.2f} km/h
+  Speed @ {n_in_rpm:.0f} rpm, with differential: {veh['speed_base']['With differential']:.2f} km/h
+  Motor rpm for {target_kmh:g} km/h: no diff {veh['n_need']['Without differential']:,.0f} | with diff {veh['n_need']['With differential']:,.0f}
 
 OVERALL STATUS: {'PASS' if overall_ok else 'CHECK REQUIRED'}
 """
@@ -1766,21 +2106,29 @@ with tabs[13]:
     st.plotly_chart(create_part_3d('Planet Pin', {'d': pin['d_pin'], 'length': comp['Planet Pin']['total_length']}),
                     use_container_width=True)
 
-with tabs[14]:
-    st.subheader("📐 OpenSCAD Parametric Export — real profile points")
-    st.caption("Uses the actual involute + trochoidal-fillet outline with exact tooth phasing (no trapezoids). "
-               "Export ONE part per STL (View = sun / planet / ring / carrier ...). Keyways, bearing seats, "
-               "retaining rings, ring mounting and a real housing are NOT modelled.")
-    scad_view = st.selectbox("View to generate:", [
-        "assembly", "exploded", "sun", "planet", "ring", "carrier", "input_shaft", "output_shaft", "planet_pin", "housing"
-    ], index=0)
-    scad_code = generate_openscad(
+
+def _scad(view):
+    """OpenSCAD source for one view, using the live design values."""
+    return generate_openscad(
         S, P, R, m_use, N_PLANETS, pp, pin['d_pin'], face_width,
         comp['Sun Gear']['bore_d'], comp['Planet Gear']['bore_d'], comp['Ring Gear']['outer_d'],
         (S + P) * m_use / 2.0, plate_thickness_mm, comp['Carrier Plate']['hub_od'],
         comp['Carrier Plate']['output_bore'], d_shaft_in, d_shaft_out,
         comp['Input Shaft']['length'], comp['Output Shaft']['length'],
-        comp['Housing']['outer_d'], comp['Housing']['length'], axial_gap=axial_gap_mm, show=scad_view)
+        comp['Housing']['outer_d'], comp['Housing']['length'], axial_gap=axial_gap_mm, show=view)
+
+
+with tabs[14]:
+    st.subheader("📐 OpenSCAD Parametric Export — real profile points")
+    st.caption("Uses the actual involute + trochoidal-fillet outline with exact tooth phasing (no trapezoids). "
+               "Pick **print_plate** for every printable part laid flat in one file, or export ONE part per STL. "
+               "In OpenSCAD: F6 (render) → File ▸ Export ▸ STL. Keyways, bearing seats, retaining rings, "
+               "ring mounting and a real housing are NOT modelled.")
+    scad_view = st.selectbox("View to generate:", [
+        "print_plate", "assembly", "exploded", "sun", "planet", "ring", "carrier", "input_shaft",
+        "output_shaft", "planet_pin", "housing"
+    ], index=0)
+    scad_code = _scad(scad_view)
     st.code(scad_code, language="openscad")
     st.download_button("⬇️ Download OpenSCAD file (.scad)", scad_code,
                         f"planetary_gearbox_{scad_view}.scad", "text/plain", key="scad_dl")
@@ -1801,6 +2149,233 @@ with tabs[15]:
         "- **Profile relief and crowning** are not Fusion Spur Gear fields; they exist only in this app's 3D / OpenSCAD output.\n"
         "- **Assembly:** planets and ring must be rotated to the phase angles in the OpenSCAD header (planet_rot, ring_rot) or the teeth will collide.")
 
+# ================================================================
+# TAB 17 : VEHICLE PERFORMANCE  (NEW in v8)
+# ================================================================
+with tabs[16]:
+    st.subheader("🚗 Vehicle Performance — tire, wheel rpm, km/h, with and without differential")
+    st.caption(f"Gearbox ratio 1:{ratio_actual:.3f} and mesh efficiency {efficiency:.2f} come from the designer; "
+               f"final drive {final_drive:.3f}:1 and differential efficiency {eff_diff:.2f} from sidebar section 15. "
+               "Speeds are ideal (no tire slip). Mass, Crr, Cd, frontal area and the final drive are ASSUMED values - "
+               "replace them with your own. Maruti 800 final drive 4.388:1 is as far as I know: verify it.")
+
+    vm1, vm2, vm3, vm4 = st.columns(4)
+    vm1.metric("Tire rolling circumference", f"{tire['circ_m']:.3f} m")
+    vm2.metric(f"Speed @ {n_in_rpm:.0f} rpm, no diff", f"{veh['speed_base']['Without differential']:.2f} km/h")
+    vm3.metric(f"Speed @ {n_in_rpm:.0f} rpm, with diff", f"{veh['speed_base']['With differential']:.2f} km/h")
+    vm4.metric(f"Motor rpm for {target_kmh:g} km/h (no diff)", f"{veh['n_need']['Without differential']:,.0f} rpm")
+
+    for title, df_ in veh['tables']:
+        st.markdown(f"**{title}**")
+        st.dataframe(df_, hide_index=True, use_container_width=True)
+
+    st.markdown("### Charts")
+    st.plotly_chart(fig_speed_vs_rpm(veh['cases'], veh['circ'], n_in_max, target_kmh), use_container_width=True)
+    chart_tq = st.selectbox("Motor torque for the force chart (N·m):", veh_torques,
+                            index=min(2, len(veh_torques) - 1), key="veh_chart_tq")
+    st.plotly_chart(fig_force_vs_speed(veh['cases'], veh['circ'], veh['rt'], chart_tq, n_in_max,
+                                       veh_mass, crr, cd_drag, frontal_area, air_rho), use_container_width=True)
+    st.caption("Where a tractive-force line meets the dashed road-load curve is the flat-road top speed; "
+               "a line that ends first is limited by the motor rpm limit (sidebar section 3).")
+
+    st.markdown("### Notes")
+    st.markdown(
+        f"- Road load at {target_kmh:g} km/h = rolling {veh['road_target']['rolling']:.0f} N + air drag "
+        f"{veh['road_target']['aero']:.0f} N = **{veh['road_target']['total']:.0f} N** "
+        f"({veh['p_wheel_target'] / 1000:.2f} kW at the wheel).\n"
+        "- Tractive force assumes constant motor torque at every speed. A real motor torque falls above its base speed.\n"
+        "- The gear stress, bearing and shaft checks in tabs 1-12 use the design output torque (section 4) and the "
+        "input speed (section 3). To check the vehicle operating point, set the input speed slider to the motor rpm "
+        "shown above.\n"
+        "- Keeping the 9:1 gearbox and removing the differential reduction gives about 10.6 km/h per 1000 motor rpm; "
+        "keeping a 4.388:1 differential drops that to about 2.4 km/h per 1000 rpm.\n"
+        "- If the gears are 3D printed, check the safety factors at the torque and speed you actually run.")
+
+
+# ================================================================
+# TAB 18 : EXPORT  (Notepad text for every tab + OpenSCAD ZIP)
+# ================================================================
+def _t(df, index=False):
+    """DataFrame -> plain text table."""
+    return df.to_string(index=index)
+
+
+def _kv(pairs):
+    """List of (key, value) -> aligned 'key : value' lines."""
+    w = max(len(str(k)) for k, _ in pairs)
+    return "\n".join(f"{str(k):<{w}} : {v}" for k, v in pairs)
+
+
+def build_tab_reports():
+    """Plain-text report for every tab (keys are sorted to give the file order)."""
+    r = {}
+    r["00 Inputs"] = _kv([
+        ("Fixed member", fixed_case), ("Target ratio", target_ratio), ("Max ring OD (mm)", max_od),
+        ("S / P / R", f"{S} / {P} / {R}"), ("Module (mm)", m_use), ("Face width (mm)", f"{face_width:.2f}"),
+        ("Input torque (N.m)", t_in_nm), ("Input speed (rpm)", n_in_rpm),
+        ("Design output torque (N.m)", design_out_tq), ("Material", selected_mat),
+        ("Mesh efficiency", efficiency),
+        ("Pressure angle (deg)", alpha_n), ("Backlash (mm)", backlash_mm), ("Root fillet (mm)", rf_mm),
+        ("ha* / c*", f"{ha_star} / {c_star}"),
+        ("Tip relief start (m) / depth (mm)", f"{tip_start} / {tip_depth}"),
+        ("Root relief start (m) / depth (mm)", f"{root_start} / {root_depth}"),
+        ("Relief exponent", relief_exp), ("Crowning (mm)", crowning_mm),
+        ("Bore fit clearance (mm)", fit_clearance_mm), ("Axial gap (mm)", axial_gap_mm),
+        ("Nozzle (mm)", nozzle_mm), ("Twist limit (deg)", twist_limit_deg),
+        ("Tire (width / aspect / rim in)", f"{tire_w:g} / {tire_ar:g} / {rim_in:g}"),
+        ("Final drive / diff efficiency", f"{final_drive:.3f} / {eff_diff:.2f}"),
+        ("Vehicle mass (kg) / Crr / Cd / area (m2)", f"{veh_mass:g} / {crr:g} / {cd_drag:g} / {frontal_area:g}"),
+        ("Target speed (km/h)", target_kmh)])
+
+    r["01 Gear Geometry"] = (
+        _t(geo_df)
+        + f"\n\nTransverse pressure angle: {alpha_t_deg:.2f} deg | Circular pitch: {geom['circular_pitch']:.2f} mm"
+        + f"\nCentre distance Sun-Planet: {geom['center_dist_sun_planet']:.2f} mm | Ring-Planet: {geom['center_dist_ring_planet']:.2f} mm"
+        + f"\nContact ratio Sun-Planet: {eps_sp:.2f} | Ring-Planet: {eps_rp:.2f}"
+        + "\n\nTooth profile (GearProfile)\n"
+        + _t(pd.DataFrame([g.summary() for g in profiles.values()], index=['Sun', 'Planet', 'Ring']).round(4), True)
+        + "\n\nPrint-readiness checks\n" + _t(pd.DataFrame(print_rows)))
+
+    cand_ = suggest_tooth_sets(fixed_case, target_ratio, N_PLANETS, max_od, ha_star=ha_star,
+                               hf_star=hf_star, s_min=max(15, z_min))
+    r["02 Tooth Synthesis"] = _kv([
+        ("Sun teeth", S), ("Planet teeth", P), ("Ring teeth", R),
+        ("Achieved ratio", f"{ratio_actual:.4f} (target {target_ratio:.3f}, err {ratio_err:.4f})"),
+        ("Assembly condition", "PASS" if assembly_pass else "FAIL"),
+        ("Clearance condition", "PASS" if clearance_pass else "FAIL"),
+        ("Module (mm)", f"{m_use:.2f}"), ("Ring OD est. (mm)", f"{est_od:.1f} (limit {max_od:.0f})"),
+        ("Mode", "Manual" if manual_teeth else "Auto-search")]) + (
+        "\n\nOther exact-ratio candidates\n" + _t(cand_.sort_values(['module', 'S']).head(25))
+        if not cand_.empty else "")
+
+    r["03 Kinematics"] = _kv([
+        ("Configuration", fixed_case), ("Input member", input_member), ("Output member", output_member),
+        ("Achieved ratio", f"{ratio_actual:.3f}"), ("Input speed (rpm)", f"{n_in_rpm:.1f}"),
+        ("Output speed (rpm)", f"{output_speed:.2f}"), ("Sun speed (rpm)", f"{kin['n_sun']:.2f}"),
+        ("Ring speed (rpm)", f"{kin['n_ring']:.2f}"), ("Carrier speed (rpm)", f"{kin['n_carrier']:.2f}"),
+        ("Planet spin rel. carrier (rpm)", f"{kin['n_planet_rel_carrier']:.2f}"),
+        ("Motor power operating (W)", f"{motor_power_operating_w:.1f}"),
+        ("Motor power design (W)", f"{motor_power_design_w:.1f}")])
+
+    r["04 Shafts and Pins"] = _kv([
+        ("Input shaft: strength dia (mm)", f"{d_in_strength:.2f}"),
+        ("Input shaft: twist dia (mm)", f"{d_in_twist:.2f}"),
+        ("Input shaft: used dia (mm)", f"{d_shaft_in:.2f}"),
+        ("Input twist (deg)", f"{defl_in['theta_deg']:.3f}"),
+        ("Output shaft: strength dia (mm)", f"{d_out_strength:.2f}"),
+        ("Output shaft: twist dia (mm)", f"{d_out_twist:.2f}"),
+        ("Output shaft: used dia (mm)", f"{d_shaft_out:.2f}"),
+        ("Output twist (deg)", f"{defl_out['theta_deg']:.3f}"),
+        ("Twist limit (deg)", f"{TWIST_LIMIT_DEG:g}"), ("Pin diameter (mm)", f"{pin['d_pin']:.2f}")])
+
+    r["05 Bearings"] = _kv([
+        ("Main bearing radial load x SF (N)", f"{main_bearing_radial:.1f}"), ("Cdyn (N)", f"{cdyn:.1f}"),
+        ("Main bearing check", "PASS" if main_bearing_pass else "FAIL"),
+        ("Main L10 (Mrev)", f"{main_bearing_life['L10_Mrev']:.2f}"),
+        ("Main L10 (h)", f"{main_bearing_life['L10_h']:.0f}"),
+        ("Planet bearing L10 (h)", f"{planet_bearing_life['L10_h']:.0f}" if planet_bearing_life else "n/a (bush)")])
+
+    r["06 Planet Load Sharing"] = _kv([
+        ("Kp", f"{Kp:.2f}"), ("KA", f"{KA:.2f}"), ("Kv", f"{KV:.3f}"), ("KHbeta", f"{KHbeta:.3f}"),
+        ("KHalpha", f"{KHalpha:.3f}"), ("Ft sun-planet (N)", f"{stress['Ft_SP']:.1f}"),
+        ("Ft ring-planet (N)", f"{stress['Ft_RP']:.1f}"), ("Pin load 2*Ft (N)", f"{stress['F_pin']:.1f}"),
+        ("ZN / YN", f"{ZN:.3f} / {YN:.3f}"),
+        ("Bending SF sun/ring/combined", f"{sfF_sp:.2f} / {sfF_rp:.2f} / {sfF_planet:.2f}"),
+        ("Contact SF sun/ring", f"{sfH_sp:.2f} / {sfH_rp:.2f}")])
+
+    r["07 Planet Pin"] = _kv([
+        ("Load (N)", f"{stress['F_pin']:.1f}"), ("Span (mm)", f"{pin_span_mm:.1f}"),
+        ("Max moment (N.mm)", f"{pin['M_max']:.1f}"), ("Shear each support (N)", f"{pin['V']:.1f}"),
+        ("Dia bending (mm)", f"{pin['d_bend']:.2f}"), ("Dia shear (mm)", f"{pin['d_shear']:.2f}"),
+        ("Design dia (mm)", f"{pin['d_pin']:.2f}"), ("Pressure (MPa)", f"{pin['bearing_pressure']:.2f}"),
+        ("Allowable (MPa)", f"{allow_bearing_pressure:.2f}"),
+        ("Check", "PASS" if pin['pressure_ok'] else "FAIL")])
+
+    r["08 Carrier"] = _kv([
+        ("Arm moment (N.mm)", f"{carrier_arm_res['M']:.1f}"),
+        ("Arm stress (MPa)", f"{carrier_arm_res['sigma']:.1f}"), ("Arm SF", f"{carrier_arm_res['sf']:.2f}"),
+        ("Arm status", "PASS" if carrier_arm_res['pass'] else "FAIL"),
+        ("Plate moment (N.mm)", f"{carrier_plate_res['M']:.1f}"),
+        ("Plate stress (MPa)", f"{carrier_plate_res['sigma']:.1f}"),
+        ("Plate SF", f"{carrier_plate_res['sf']:.2f}"),
+        ("Plate status", "PASS" if carrier_plate_res['pass'] else "FAIL")])
+
+    r["09 Ring Rim"] = _kv([
+        ("Rim thickness (mm)", f"{ring_rim_res['rim_thickness']:.2f}"), ("mB", f"{ring_rim_res['mB']:.2f}"),
+        ("YB", f"{ring_rim_res['YB']:.2f}"), ("Adjusted sigmaF (MPa)", f"{ring_rim_res['sigmaF_adj']:.1f}"),
+        ("SF", f"{ring_rim_res['sf']:.2f}"), ("Status", "PASS" if ring_rim_res['pass'] else "FAIL")])
+
+    r["10 Keys-Splines"] = _kv([
+        ("Key (w x h x l, mm)", f"{key_width_mm:g} x {key_height_mm:g} x {key_length_mm:g}"),
+        ("Input key shear / bearing SF", f"{key_in_res['sf_shear']:.2f} / {key_in_res['sf_bearing']:.2f}"),
+        ("Output key shear / bearing SF", f"{key_out_res['sf_shear']:.2f} / {key_out_res['sf_bearing']:.2f}"),
+        ("Input key", "PASS" if key_in_res['pass'] else "FAIL"),
+        ("Output key", "PASS" if key_out_res['pass'] else "FAIL")])
+
+    r["11 Component Dimensions"] = "\n\n".join(
+        f"[{name}]\n" + _kv([(k.replace('_', ' '), f"{v:.2f} mm") for k, v in d.items()])
+        for name, d in comp.items())
+
+    r["12 Overall Results"] = (
+        _t(kpi) + "\n\nPASS/FAIL checks\n"
+        + "\n".join(f"{'PASS' if v else 'FAIL'}  {k}" for k, v in overall_checks.items())
+        + f"\n\nOVERALL: {'PASS' if overall_ok else 'CHECK REQUIRED'}")
+
+    r["13 Parameter Glossary"] = "\n\n".join(
+        f"[{cat}]\n" + _t(pd.DataFrame(ent, columns=['Symbol', 'Meaning', 'Unit', 'Typical', 'Role']))
+        for cat, ent in PARAM_GLOSSARY.items())
+
+    r["16 Fusion 360 Inputs"] = _t(fus_main, True) + "\n\nReference dimensions\n" + _t(fus_ref, True)
+
+    r["17 Vehicle Performance"] = (
+        f"Gearbox ratio 1:{ratio_actual:.3f} | mesh efficiency {efficiency:.2f} | final drive {final_drive:.3f}:1 | "
+        f"differential efficiency {eff_diff:.2f}\n"
+        f"Ideal speeds (no tire slip). Mass / Crr / Cd / area / final drive are assumed values.\n\n"
+        + "\n\n".join(f"[{title}]\n{_t(df_)}" for title, df_ in veh['tables']))
+    return r
+
+
+with tabs[17]:
+    st.subheader("💾 Export — Notepad text & 3D-print files")
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    reports = build_tab_reports()
+    header = (f"PLANETARY GEARBOX  S={S} P={P} R={R} m={m_use:.2f}  ratio 1:{ratio_actual:.3f}  "
+              f"{fixed_case}  {datetime.datetime.now():%Y-%m-%d %H:%M}\n" + "=" * 78 + "\n\n")
+    all_txt = header + "\n\n".join(
+        f"{'=' * 78}\n TAB {k}\n{'=' * 78}\n{v}" for k, v in sorted(reports.items()))
+
+    st.markdown("### 1. Tab details → Notepad (.txt)")
+    st.caption("Tabs 14 (3D) and 15 (OpenSCAD) have no text report: the OpenSCAD code is in section 2 below.")
+    st.download_button("⬇️ ALL tabs in ONE .txt", all_txt.encode("utf-8"),
+                       f"gearbox_all_tabs_{stamp}.txt", "text/plain", key="dl_all_txt")
+
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for k, v in sorted(reports.items()):
+            zf.writestr(f"{k.replace(' ', '_')}.txt", header + v)
+    st.download_button("⬇️ One .txt per tab (ZIP)", zbuf.getvalue(), f"gearbox_tabs_{stamp}.zip",
+                       "application/zip", key="dl_tabs_zip")
+
+    pick = st.selectbox("Or pick a single tab to copy / save:", sorted(reports.keys()))
+    st.code(reports[pick], language=None)          # hover top-right of this box -> COPY icon
+    st.download_button(f"⬇️ Save '{pick}' as .txt", (header + reports[pick]).encode("utf-8"),
+                       f"gearbox_{pick.replace(' ', '_')}_{stamp}.txt", "text/plain", key="dl_one_txt")
+
+    st.markdown("### 2. OpenSCAD files for 3D printing")
+    st.caption("Open in OpenSCAD → F6 (render) → File ▸ Export ▸ STL. `print_plate` has every printable "
+               "part laid flat. Shafts are not on the plate (use steel rod).")
+    scad_parts = ["print_plate", "assembly", "exploded", "sun", "planet", "ring", "carrier",
+                  "input_shaft", "output_shaft", "planet_pin", "housing"]
+    sbuf = io.BytesIO()
+    with zipfile.ZipFile(sbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for v in scad_parts:
+            zf.writestr(f"gearbox_{v}.scad", _scad(v))
+        zf.writestr("gearbox_all_tabs.txt", all_txt)
+    st.download_button("⬇️ ALL .scad files + report (ZIP)", sbuf.getvalue(), f"gearbox_scad_{stamp}.zip",
+                       "application/zip", key="dl_scad_zip")
+    st.download_button("⬇️ print_plate.scad (all parts flat)", _scad("print_plate"),
+                       "gearbox_print_plate.scad", "text/plain", key="dl_plate")
+
 st.divider()
 with st.expander("📋 Pastable Input Configuration (JSON)"):
     config_json = json.dumps({
@@ -1817,6 +2392,11 @@ with st.expander("📋 Pastable Input Configuration (JSON)"):
         "root_relief_start_m": root_start, "root_relief_depth_mm": root_depth,
         "relief_exponent": relief_exp, "crowning_mm": crowning_mm,
         "bore_fit_clearance_mm": fit_clearance_mm, "axial_gap_mm": axial_gap_mm,
+        "tire_width_mm": tire_w, "tire_aspect_pct": tire_ar, "rim_diameter_in": rim_in,
+        "final_drive_ratio": final_drive, "differential_efficiency": eff_diff,
+        "vehicle_mass_kg": veh_mass, "crr": crr, "cd": cd_drag, "frontal_area_m2": frontal_area,
+        "air_density_kg_m3": air_rho, "target_speed_kmh": target_kmh,
+        "vehicle_motor_torques_nm": veh_torques, "vehicle_motor_rpms": veh_rpms,
     }, indent=2)
     st.code(config_json, language="json")
 
